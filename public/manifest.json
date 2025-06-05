@@ -1,7 +1,7 @@
 {
-  "name": "YakBak",
-  "short_name": "YakBak",
-  "description": "Voice Messages on Nostr",
+  "name": "MIC",
+  "short_name": "MIC",
+  "description": "Bitcoin Voice Messages on IRL.TRAVEL",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#000000",
