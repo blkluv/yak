@@ -3,63 +3,29 @@ import { useAuthor } from "@/hooks/useAuthor";
 import { Card } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import {
-  MessageSquare,
-  Heart,
-  Zap,
-  Mic,
-  MicOff,
-  Play,
-  Trash2,
-  MoreVertical,
-  Copy,
-  Share2,
-  Hash,
-} from "lucide-react";
+import { Heart, Zap, Mic, MicOff, Play, Trash2 } from "lucide-react";
 import { useNostrPublish } from "@/hooks/useNostrPublish";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useNostr } from "@nostrify/react";
 import { toast } from "sonner";
-import { useState, useEffect, useRef } from "react";
+import { useState, useRef } from "react";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
-  DialogDescription,
-  DialogFooter,
 } from "@/components/ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { uploadToBlossom, getBlossomServers } from "@/lib/blossom";
 import { nip19 } from "nostr-tools";
-import { useQueryClient } from "@tanstack/react-query";
-import { Link, useLocation } from "react-router-dom";
-import { useNWC } from "@/hooks/useNWC";
-import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { Link as RouterLink } from "react-router-dom";
 
 interface ThreadedNostrEvent extends NostrEvent {
   replies: ThreadedNostrEvent[];
 }
 
-interface QueryData {
-  pages: ThreadedNostrEvent[][];
-  pageParams: number[];
-}
-
 interface VoiceMessagePostProps {
   message: ThreadedNostrEvent;
-}
-
-function isHexId(id: string) {
-  return /^[0-9a-f]{64}$/i.test(id);
 }
 
 export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
@@ -68,46 +34,36 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   const { user } = useCurrentUser();
   const { nostr } = useNostr();
   const { mutate: publishEvent } = useNostrPublish();
-  const queryClient = useQueryClient();
-  const { sendZap, settings } = useNWC();
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [isReplyDialogOpen, setIsReplyDialogOpen] = useState(false);
-  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [hasReacted, setHasReacted] = useState(false);
-  const [recordingTime, setRecordingTime] = useState(0);
-  const MAX_RECORDING_TIME = 60;
-  const [reactionCount, setReactionCount] = useState(0);
-  const [zapAmount, setZapAmount] = useState(0);
-  const [hasZapped, setHasZapped] = useState(false);
-  const [duration, setDuration] = useState<number | null>(null);
+
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const location = useLocation();
-  const isMessagePage = location.pathname.startsWith("/message/");
 
   const displayName = metadata?.name || message.pubkey.slice(0, 8);
   const profileImage = metadata?.picture;
   const npub = nip19.npubEncode(message.pubkey);
 
-  // -----------------------------
-  // SAFE RECORDING (FIXED)
-  // -----------------------------
+  // --------------------------------------------------
+  // 🎤 RECORDING (FORCE STABLE MIME)
+  // --------------------------------------------------
+
   const handleStartRecording = async () => {
     if (!user) return;
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm")
-        ? "audio/webm"
-        : MediaRecorder.isTypeSupported("audio/mp4")
+      // 🔥 Prefer MP4 on Chrome for stability
+      const mimeType = MediaRecorder.isTypeSupported("audio/mp4")
         ? "audio/mp4"
-        : "";
+        : "audio/webm";
 
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+      const recorder = new MediaRecorder(stream, { mimeType });
+
       const chunks: Blob[] = [];
 
       recorder.ondataavailable = (event) => {
@@ -116,7 +72,7 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
 
       recorder.onstop = () => {
         const blob = new Blob(chunks, {
-          type: recorder.mimeType || "audio/webm",
+          type: recorder.mimeType || mimeType,
         });
 
         const url = URL.createObjectURL(blob);
@@ -128,9 +84,9 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
       recorder.start();
       setMediaRecorder(recorder);
       setIsRecording(true);
-      setRecordingTime(0);
     } catch (error) {
-      toast.error("Failed to access microphone");
+      console.error(error);
+      toast.error("Microphone access failed");
     }
   };
 
@@ -142,15 +98,15 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
     }
   };
 
-  const handleDiscardRecording = () => {
+  const handleDiscard = () => {
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(null);
-    setRecordingTime(0);
   };
 
-  // -----------------------------
-  // FIXED PUBLISH (NO VIDEO MIME)
-  // -----------------------------
+  // --------------------------------------------------
+  // 🚀 PUBLISH
+  // --------------------------------------------------
+
   const handlePublishReply = async () => {
     if (!previewUrl || !user?.pubkey || !user.signer) {
       toast.error("Please record first");
@@ -161,20 +117,13 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
 
     try {
       const response = await fetch(previewUrl);
-      const audioBlob = await response.blob();
+      const rawBlob = await response.blob();
 
-      const cleanBlob = new Blob([audioBlob], {
-        type: audioBlob.type || "audio/webm",
-      });
-
-      const audio = new Audio(URL.createObjectURL(cleanBlob));
-      const duration = await new Promise<number>((resolve, reject) => {
-        audio.onloadedmetadata = () => resolve(audio.duration);
-        audio.onerror = reject;
+      const cleanBlob = new Blob([rawBlob], {
+        type: rawBlob.type || "audio/mp4",
       });
 
       const blossomServers = await getBlossomServers(nostr, user.pubkey);
-      if (!blossomServers.length) throw new Error("No blossom servers");
 
       const audioUrl = await uploadToBlossom(
         cleanBlob,
@@ -191,27 +140,31 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
             ["e", message.id, "", "root"],
             ["e", message.id, "", "reply"],
             ["p", message.pubkey],
-            ["duration", Math.round(duration).toString()],
           ],
         },
         {
           onSuccess: () => {
-            handleDiscardRecording();
+            handleDiscard();
             setIsReplyDialogOpen(false);
             toast.success("Voice reply published");
             setIsProcessing(false);
           },
           onError: () => {
-            toast.error("Publishing failed");
+            toast.error("Publish failed");
             setIsProcessing(false);
           },
         }
       );
     } catch (error) {
-      toast.error("Failed to publish");
+      console.error(error);
+      toast.error("Upload failed");
       setIsProcessing(false);
     }
   };
+
+  // --------------------------------------------------
+  // UI
+  // --------------------------------------------------
 
   return (
     <Card className="p-4">
@@ -233,14 +186,12 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
             </span>
           </div>
 
-          {/* FIXED PLAYER (NO FORCED TYPE) */}
+          {/* 🔥 FIXED PLAYER */}
           <div className="mt-2">
-            <audio
-              controls
-              className="w-full"
-              ref={audioRef}
-              src={message.content}
-            />
+            <audio controls className="w-full" ref={audioRef}>
+              <source src={message.content} />
+              Your browser does not support the audio element.
+            </audio>
           </div>
 
           <div className="mt-4 flex items-center gap-6">
@@ -271,7 +222,7 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
                     {isRecording ? (
                       <>
                         <MicOff className="mr-2 h-4 w-4" />
-                        {recordingTime}s
+                        Stop Recording
                       </>
                     ) : (
                       <>
@@ -282,11 +233,10 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
                   </Button>
                 ) : (
                   <>
-                    <audio
-                      controls
-                      className="w-full"
-                      src={previewUrl}
-                    />
+                    <audio controls className="w-full">
+                      <source src={previewUrl} />
+                    </audio>
+
                     <div className="flex gap-2 mt-4">
                       <Button
                         onClick={handlePublishReply}
@@ -296,8 +246,9 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
                         <Play className="mr-2 h-4 w-4" />
                         Publish
                       </Button>
+
                       <Button
-                        onClick={handleDiscardRecording}
+                        onClick={handleDiscard}
                         variant="destructive"
                         className="flex-1"
                       >
