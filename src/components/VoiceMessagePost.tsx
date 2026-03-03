@@ -52,44 +52,51 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   // --------------------------------------------------
 
   const handleStartRecording = async () => {
-    if (!user) return;
+  if (!user) return;
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+      },
+    });
 
-      // 🔥 Prefer MP4 on Chrome for stability
-      const mimeType = MediaRecorder.isTypeSupported("audio/mp4")
-        ? "audio/mp4"
-        : "audio/webm";
+    // 🔥 Force proper opus codec
+    const mimeType = "audio/webm;codecs=opus";
 
-      const recorder = new MediaRecorder(stream, { mimeType });
+    const recorder = new MediaRecorder(stream, { mimeType });
 
-      const chunks: Blob[] = [];
+    const chunks: Blob[] = [];
 
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunks.push(event.data);
-      };
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        chunks.push(event.data);
+      }
+    };
 
-      recorder.onstop = () => {
-        const blob = new Blob(chunks, {
-          type: recorder.mimeType || mimeType,
-        });
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: mimeType });
 
-        const url = URL.createObjectURL(blob);
-        setPreviewUrl(url);
+      console.log("Recorded blob:", blob);
+      console.log("Blob size:", blob.size);
+      console.log("Blob type:", blob.type);
 
-        stream.getTracks().forEach((t) => t.stop());
-      };
+      const url = URL.createObjectURL(blob);
+      setPreviewUrl(url);
 
-      recorder.start();
-      setMediaRecorder(recorder);
-      setIsRecording(true);
-    } catch (error) {
-      console.error(error);
-      toast.error("Microphone access failed");
-    }
-  };
+      stream.getTracks().forEach((t) => t.stop());
+    };
 
+    recorder.start();
+    setMediaRecorder(recorder);
+    setIsRecording(true);
+  } catch (error) {
+    console.error("Recording error:", error);
+    toast.error("Microphone access failed");
+  }
+};
   const handleStopRecording = () => {
     if (mediaRecorder && mediaRecorder.state === "recording") {
       mediaRecorder.stop();
