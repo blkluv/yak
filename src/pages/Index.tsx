@@ -16,10 +16,10 @@ const Index = () => {
       <Card className="w-full max-w-2xl mx-4 mt-4">
         <CardHeader>
           <CardTitle className="text-4xl font-bold text-center">
-            Welcome to YakBak!
+            Welcome to LUMEE BOOTH!
           </CardTitle>
           <CardDescription className="text-xl text-center">
-            YakBak is a simple voice messaging app built on Nostr.
+            LUMEE BOOTH is a simple voice messaging app built on Nostr.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
