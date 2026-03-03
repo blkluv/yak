@@ -4,10 +4,12 @@ import { LoginArea } from "@/components/auth/LoginArea";
 export function Navigation() {
   return (
     <nav className="border-b bg-white sticky top-0 z-50">
-      <div className="container mx-auto px-4 py-3">
+      <div className="container mx-auto px-4">
 
-        {/* Top Row */}
-        <div className="flex items-center justify-between">
+        {/* TOP BAR */}
+        <div className="h-16 flex items-center justify-between">
+
+          {/* Logo + Tagline */}
           <Link to="/" className="flex items-center space-x-3">
             <img
               src="/yakbak-logo.png"
@@ -16,53 +18,58 @@ export function Navigation() {
             />
             <div className="leading-tight">
               <div className="text-lg font-bold">ATL5D</div>
-              <div className="text-xs text-gray-500">
+              <div className="text-xs text-gray-500 hidden sm:block">
                 The audio reality show you monetize.
               </div>
             </div>
           </Link>
 
-          <LoginArea />
-        </div>
+          {/* Desktop Nav */}
+          <div className="hidden md:flex items-center gap-6 text-sm font-medium">
 
-        {/* Mobile Ecosystem Row */}
-        <div className="flex md:hidden mt-3 gap-2 overflow-x-auto">
+            <a
+              href="https://t.atl5d.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-black text-gray-600 transition"
+            >
+              Telegram
+            </a>
 
-          <a
-            href="https://t.atl5d.com"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="px-3 py-1 text-xs rounded-full bg-blue-500 text-white whitespace-nowrap"
-          >
-            💬 Telegram
-          </a>
+            <a
+              href="https://market.atl5d.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-black text-gray-600 transition"
+            >
+              Market
+            </a>
 
-          <a
-            href="https://market.atl5d.com"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="px-3 py-1 text-xs rounded-full bg-black text-white whitespace-nowrap"
-          >
-            🛒 Market
-          </a>
+            <a
+              href="https://tiktok.com/@atl5d"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-black text-gray-600 transition"
+            >
+              @atl5d
+            </a>
 
-          <a
-            href="https://tiktok.com/@atl5d"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="px-3 py-1 text-xs rounded-full border border-gray-300 whitespace-nowrap"
-          >
-            @atl5d
-          </a>
+            <a
+              href="https://tiktok.com/@atlrent"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-black text-gray-600 transition"
+            >
+              @atlrent
+            </a>
 
-          <a
-            href="https://tiktok.com/@atlrent"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="px-3 py-1 text-xs rounded-full border border-gray-300 whitespace-nowrap"
-          >
-            @atlrent
-          </a>
+            <LoginArea />
+          </div>
+
+          {/* Mobile Login Only */}
+          <div className="md:hidden">
+            <LoginArea />
+          </div>
 
         </div>
 
