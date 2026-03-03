@@ -56,17 +56,11 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
 
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-      },
+      audio: true,
     });
 
-    // 🔥 Force proper opus codec
-    const mimeType = "audio/webm;codecs=opus";
-
-    const recorder = new MediaRecorder(stream, { mimeType });
+    // ❌ DO NOT force mimeType on iOS
+    const recorder = new MediaRecorder(stream);
 
     const chunks: Blob[] = [];
 
@@ -77,24 +71,24 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
     };
 
     recorder.onstop = () => {
-      const blob = new Blob(chunks, { type: mimeType });
+      const blob = new Blob(chunks); // Let browser decide type
 
-      console.log("Recorded blob:", blob);
-      console.log("Blob size:", blob.size);
       console.log("Blob type:", blob.type);
+      console.log("Blob size:", blob.size);
 
       const url = URL.createObjectURL(blob);
       setPreviewUrl(url);
 
-      stream.getTracks().forEach((t) => t.stop());
+      stream.getTracks().forEach((track) => track.stop());
     };
 
     recorder.start();
+
     setMediaRecorder(recorder);
     setIsRecording(true);
-  } catch (error) {
-    console.error("Recording error:", error);
-    toast.error("Microphone access failed");
+  } catch (err) {
+    console.error(err);
+    toast.error("Microphone failed");
   }
 };
   const handleStopRecording = () => {
