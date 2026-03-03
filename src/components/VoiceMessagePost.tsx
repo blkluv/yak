@@ -1,5 +1,3 @@
-// 🔥 FULLY FIXED VoiceMessagePost (Recording + Reply Publishing Fixed)
-
 import { useState, useEffect, useRef } from "react";
 import { NostrEvent } from "@nostrify/nostrify";
 import { useNostrPublish } from "@/hooks/useNostrPublish";
