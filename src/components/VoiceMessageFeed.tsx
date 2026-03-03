@@ -1,5 +1,5 @@
-import { useEffect, useState, useMemo, useRef } from "react";
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useEffect, useState, useMemo, useRef, useCallback } from "react";
+import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@nostrify/react";
 import { VoiceMessagePost } from "./VoiceMessagePost";
 import { useInView } from "react-intersection-observer";
@@ -7,10 +7,12 @@ import { NostrEvent } from "@nostrify/nostrify";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Globe, Users, ChevronDown, ChevronUp } from "lucide-react";
-import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 
 const PAGE_SIZE = 10;
+const MAX_CACHED_EVENTS = 1000;
+const POLL_INTERVAL_ACTIVE = 5000;
+const POLL_INTERVAL_IDLE = 15000;
 
 type FeedFilter = "global" | "following";
 
@@ -18,9 +20,9 @@ interface ThreadedMessage extends NostrEvent {
   replies: ThreadedMessage[];
 }
 
-interface QueryData {
-  pages: ThreadedMessage[][];
-  pageParams: number[];
+// Type guard
+function isNostrEvent(event: unknown): event is NostrEvent {
+  return !!event && typeof event === 'object' && 'id' in event && 'kind' in event;
 }
 
 export function VoiceMessageFeed() {
@@ -29,11 +31,10 @@ export function VoiceMessageFeed() {
   const { ref, inView } = useInView();
   const [filter, setFilter] = useState<FeedFilter>("global");
   const queryClient = useQueryClient();
-  const [updateCounter, setUpdateCounter] = useState(0);
   const processedEvents = useRef<Set<string>>(new Set());
-  const [expandedReplies, setExpandedReplies] = useState<Set<string>>(
-    new Set()
-  );
+  const threadMapRef = useRef<Map<string, ThreadedMessage>>(new Map());
+  const [expandedReplies, setExpandedReplies] = useState<Set<string>>(new Set());
+  const [pollingInterval, setPollingInterval] = useState(POLL_INTERVAL_ACTIVE);
 
   const {
     data,
@@ -45,410 +46,238 @@ export function VoiceMessageFeed() {
     refetch,
   } = useInfiniteQuery({
     queryKey: ["voiceMessages", filter],
-    initialPageParam: Math.floor(Date.now() / 1000), // Start from current time
-    queryFn: async ({ pageParam = Math.floor(Date.now() / 1000) }) => {
-      const signal = AbortSignal.timeout(1500);
+    initialPageParam: Math.floor(Date.now() / 1000),
+    queryFn: async ({ pageParam }) => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 1500);
 
-      // Base filter for voice messages
-      const baseFilter = {
-        kinds: [1222],
-        limit: PAGE_SIZE,
-        until: pageParam as number,
-        // Remove the since filter to get all messages
-      };
+      try {
+        const baseFilter = {
+          kinds: [1222],
+          limit: PAGE_SIZE,
+          until: pageParam as number,
+        };
 
-      // If following filter is selected and user is logged in, add authors filter
-      if (filter === "following" && user?.pubkey) {
-        console.log(
-          "[VoiceMessageFeed] Fetching following list for user:",
-          user.pubkey
-        );
-        const following = await nostr.query(
-          [
-            {
-              kinds: [3],
-              authors: [user.pubkey],
-              limit: 1,
-            },
-          ],
-          { signal }
-        );
-
-        const followingEvent = following[0];
-        if (followingEvent?.tags) {
-          const followingList = followingEvent.tags
-            .filter((tag) => tag[0] === "p")
-            .map((tag) => tag[1]);
-
-          console.log(
-            "[VoiceMessageFeed] Following list length:",
-            followingList.length
+        if (filter === "following" && user?.pubkey) {
+          const following = await nostr.query(
+            [{ kinds: [3], authors: [user.pubkey], limit: 1 }],
+            { signal: controller.signal }
           );
 
-          if (followingList.length > 0) {
-            console.log(
-              "[VoiceMessageFeed] Fetching following feed with authors:",
-              followingList
-            );
-            const followingEvents = await nostr.query(
-              [
-                {
-                  ...baseFilter,
-                  authors: followingList,
-                },
-              ],
-              { signal }
-            );
-            console.log(
-              "[VoiceMessageFeed] Following feed events:",
-              followingEvents.length
-            );
-            return followingEvents;
-          } else {
-            console.log("[VoiceMessageFeed] Following list is empty");
-          }
-        } else {
-          console.log("[VoiceMessageFeed] No following event found");
-        }
-        return [];
-      }
+          const followingEvent = following[0];
+          if (followingEvent?.tags) {
+            const followingList = followingEvent.tags
+              .filter((tag) => tag[0] === "p")
+              .map((tag) => tag[1]);
 
-      // Global feed
-      console.log("[VoiceMessageFeed] Fetching global feed");
-      const globalEvents = await nostr.query([baseFilter], { signal });
-      console.log(
-        "[VoiceMessageFeed] Global feed events:",
-        globalEvents.length
-      );
-      return globalEvents;
-    },
-    getNextPageParam: (lastPage: NostrEvent[]) => {
-      if (!lastPage || lastPage.length < PAGE_SIZE) {
-        console.log("[VoiceMessageFeed] No more pages available");
-        return undefined;
+            if (followingList.length > 0) {
+              const events = await nostr.query(
+                [{ ...baseFilter, authors: followingList }],
+                { signal: controller.signal }
+              );
+              return Array.isArray(events) ? events : [];
+            }
+          }
+          return [];
+        }
+
+        const events = await nostr.query([baseFilter], { signal: controller.signal });
+        return Array.isArray(events) ? events : [];
+      } finally {
+        clearTimeout(timeoutId);
       }
+    },
+    getNextPageParam: (lastPage) => {
+      if (!lastPage?.length || lastPage.length < PAGE_SIZE) return undefined;
       const lastMessage = lastPage[lastPage.length - 1];
-      if (!lastMessage) {
-        console.log("[VoiceMessageFeed] No last message found");
-        return undefined;
-      }
-      // Subtract 1 from the timestamp to avoid getting the same message again
-      const nextParam = lastMessage.created_at - 1;
-      console.log(
-        "[VoiceMessageFeed] Next page param:",
-        nextParam,
-        new Date(nextParam * 1000).toISOString()
-      );
-      return nextParam;
+      return lastMessage?.created_at ? lastMessage.created_at - 1 : undefined;
     },
-    refetchOnWindowFocus: true,
-    refetchOnMount: true,
-    refetchOnReconnect: true,
   });
 
-  // Poll for new events
+  // Adaptive polling
   useEffect(() => {
     if (!nostr) return;
 
-    const pollInterval = setInterval(async () => {
+    let consecutiveEmptyPolls = 0;
+    
+    const poll = async () => {
       try {
-        console.log("[VoiceMessageFeed] Polling for new events...");
         const events = await nostr.query(
-          [
-            {
-              kinds: [1222],
-              since: Math.floor(Date.now() / 1000) - 30, // Last 30 seconds
-            },
-          ],
+          [{ kinds: [1222], since: Math.floor(Date.now() / 1000) - 30 }],
           { signal: AbortSignal.timeout(2000) }
         );
 
-        console.log("[VoiceMessageFeed] Received events:", events.length);
-        events.forEach((event) => {
-          console.log("[VoiceMessageFeed] Event:", {
-            id: event.id,
-            kind: event.kind,
-            pubkey: event.pubkey,
-            created_at: new Date(event.created_at * 1000).toISOString(),
-            tags: event.tags,
-          });
-        });
-
-        let cacheUpdated = false;
-
-        for (const event of events) {
-          // Skip if we've already processed this event
-          if (processedEvents.current.has(event.id)) {
-            console.log(
-              "[VoiceMessageFeed] Skipping already processed event:",
-              event.id
-            );
-            continue;
+        // Update polling interval based on activity
+        if (events.length === 0) {
+          consecutiveEmptyPolls++;
+          if (consecutiveEmptyPolls > 3) {
+            setPollingInterval(POLL_INTERVAL_IDLE);
           }
-
-          const rootTag = event.tags.find(
-            (tag) => tag[0] === "e" && tag[3] === "root"
-          );
-          const replyTag = event.tags.find(
-            (tag) => tag[0] === "e" && tag[3] === "reply"
-          );
-
-          console.log("[VoiceMessageFeed] Processing event:", {
-            id: event.id,
-            isReply: !!(rootTag && replyTag),
-            rootId: rootTag?.[1],
-            replyId: replyTag?.[1],
-          });
-
-          if (rootTag && replyTag) {
-            console.log(
-              "[VoiceMessageFeed] Found reply event, updating cache for filter:",
-              filter
-            );
-
-            queryClient.setQueryData<QueryData>(
-              ["voiceMessages", filter],
-              (oldData) => {
-                if (!oldData) {
-                  console.log("[VoiceMessageFeed] No existing data in cache");
-                  return oldData;
-                }
-
-                let specificEventProcessedAndCacheUpdated = false; // Flag for the current event
-
-                const updatedPages = oldData.pages.map((page) => {
-                  return page.map((msg) => {
-                    if (msg.id === rootTag[1]) { // We are looking at the parent of 'event'
-                      const existingReplyIndex = (msg.replies || []).findIndex(reply => {
-                          if (reply.id === event.id) return true; // Real event already exists
-                          if (reply.id.startsWith("temp-")) {
-                              const tempReplyEventTag = reply.tags.find(t => t[0] === 'e' && t[3] === 'reply');
-                              const realEventReplyTag = event.tags.find(t => t[0] === 'e' && t[3] === 'reply');
-                              // Check if both are replies to the same parent event ID
-                              return tempReplyEventTag && realEventReplyTag && tempReplyEventTag[1] === realEventReplyTag[1];
-                          }
-                          return false;
-                      });
-
-                      if (existingReplyIndex !== -1) {
-                        console.log(
-                          "[VoiceMessageFeed] Replacing temporary or existing reply with real event:",
-                          event.id
-                        );
-                        const newReplies = [...(msg.replies || [])];
-                        newReplies[existingReplyIndex] = {
-                          ...event,
-                          replies: [],
-                        };
-                        specificEventProcessedAndCacheUpdated = true; 
-                        return {
-                          ...msg,
-                          replies: newReplies.sort(
-                            (a, b) => a.created_at - b.created_at
-                          ),
-                        } as ThreadedMessage;
-                      } else {
-                        // Add new reply only if it's not already there (findIndex should handle this, but a belt-and-suspenders check)
-                        if (!(msg.replies || []).some(reply => reply.id === event.id)) {
-                          console.log(
-                            "[VoiceMessageFeed] Adding new reply to message:",
-                            {
-                              rootId: msg.id,
-                              replyId: event.id,
-                            }
-                          );
-                          specificEventProcessedAndCacheUpdated = true;
-                          return {
-                            ...msg,
-                            replies: [
-                              ...(msg.replies || []),
-                              { ...event, replies: [] },
-                            ].sort((a, b) => a.created_at - b.created_at),
-                          } as ThreadedMessage;
-                        }
-                      }
-                    }
-                    return msg;
-                  });
-                });
-
-                if (specificEventProcessedAndCacheUpdated) {
-                  processedEvents.current.add(event.id); 
-                  cacheUpdated = true; 
-                }
-                return { ...oldData, pages: updatedPages };
-              }
-            );
-          }
+        } else {
+          consecutiveEmptyPolls = 0;
+          setPollingInterval(POLL_INTERVAL_ACTIVE);
         }
 
-        if (cacheUpdated) {
-          console.log(
-            "[VoiceMessageFeed] Cache was updated, forcing re-render"
-          );
-          setUpdateCounter((prev) => prev + 1);
+        // Process events (with size limit)
+        for (const event of events) {
+          if (!isNostrEvent(event)) continue;
+          
+          // Prevent memory leak
+          if (processedEvents.current.size > MAX_CACHED_EVENTS) {
+            const entries = Array.from(processedEvents.current);
+            processedEvents.current = new Set(entries.slice(-MAX_CACHED_EVENTS));
+          }
+          
+          if (processedEvents.current.has(event.id)) continue;
+          
+          // Update cache atomically
+          await processNewEvent(event);
+          processedEvents.current.add(event.id);
         }
       } catch (error) {
-        console.error(
-          "[VoiceMessageFeed] Error polling for new events:",
-          error
-        );
+        console.error("Polling error:", error);
       }
-    }, 5000);
-
-    return () => {
-      clearInterval(pollInterval);
     };
-  }, [nostr, queryClient, filter]);
 
-  // Organize messages into threads
-  const threadedMessages = useMemo(() => {
-    if (!data?.pages) return [];
+    const interval = setInterval(poll, pollingInterval);
+    return () => clearInterval(interval);
+  }, [nostr, filter, pollingInterval]);
 
-    console.log(
-      "[VoiceMessageFeed] Recomputing threaded messages, update counter:",
-      updateCounter
+  // Atomic cache update
+  const processNewEvent = useCallback(async (event: NostrEvent) => {
+    const rootTag = event.tags.find(t => t[0] === "e" && t[3] === "root");
+    const replyTag = event.tags.find(t => t[0] === "e" && t[3] === "reply");
+
+    if (!rootTag || !replyTag) return;
+
+    queryClient.setQueryData<{ pages: ThreadedMessage[][] }>(
+      ["voiceMessages", filter],
+      (oldData) => {
+        if (!oldData) return oldData;
+
+        // Deep clone to avoid mutation
+        const newData = JSON.parse(JSON.stringify(oldData));
+        let updated = false;
+
+        newData.pages = newData.pages.map((page: ThreadedMessage[]) => 
+          page.map((msg: ThreadedMessage) => {
+            if (msg.id === rootTag[1]) {
+              const exists = msg.replies?.some(r => r.id === event.id);
+              if (!exists) {
+                updated = true;
+                return {
+                  ...msg,
+                  replies: [...(msg.replies || []), { ...event, replies: [] }]
+                    .sort((a, b) => a.created_at - b.created_at)
+                };
+              }
+            }
+            return msg;
+          })
+        );
+
+        return updated ? newData : oldData;
+      }
     );
+  }, [queryClient, filter]);
+
+  // Memoized thread builder
+  const threadedMessages = useMemo(() => {
+    if (!data?.pages?.length) return [];
+    
     const allMessages = data.pages.flat();
     const messageMap = new Map<string, ThreadedMessage>();
     const rootMessages: ThreadedMessage[] = [];
-    const processedMessages = new Set<string>();
 
-    // First pass: create message objects with empty replies array
-    allMessages.forEach((message) => {
-      messageMap.set(message.id, { ...message, replies: message.replies || [] });
+    // Build map
+    allMessages.forEach(msg => {
+      messageMap.set(msg.id, { ...msg, replies: [] });
     });
 
-    // Second pass: organize into threads
-    allMessages.forEach((message) => {
-      if (processedMessages.has(message.id)) return;
-
-      const rootTag = message.tags.find(
-        (tag) => tag[0] === "e" && tag[3] === "root"
-      );
-      const replyTag = message.tags.find(
-        (tag) => tag[0] === "e" && tag[3] === "reply"
-      );
-
-      const threadedMessage = messageMap.get(message.id);
-      if (!threadedMessage) return;
-
+    // Build threads
+    allMessages.forEach(msg => {
+      const rootTag = msg.tags.find(t => t[0] === "e" && t[3] === "root");
       if (rootTag) {
-        const rootId = rootTag[1];
-        const rootMessage = messageMap.get(rootId);
-        if (rootMessage) {
-          // Check if this reply already exists
-          const existingReplyIndex = rootMessage.replies.findIndex(
-            (reply) => reply.id === message.id || reply.id.startsWith("temp-")
-          );
-
-          if (existingReplyIndex === -1) {
-            rootMessage.replies.push(threadedMessage);
-          } else {
-            // Replace the temporary reply with the real one
-            rootMessage.replies[existingReplyIndex] = threadedMessage;
-          }
-          processedMessages.add(message.id);
+        const parent = messageMap.get(rootTag[1]);
+        if (parent && !parent.replies.some(r => r.id === msg.id)) {
+          parent.replies.push({ ...msg, replies: [] });
         }
-      } else if (!replyTag) {
-        // This is a root message
-        rootMessages.push(threadedMessage);
-        processedMessages.add(message.id);
+      } else {
+        const root = messageMap.get(msg.id);
+        if (root) rootMessages.push(root);
       }
     });
 
-    // Sort root messages by created_at
-    return rootMessages.sort((a, b) => b.created_at - a.created_at);
-  }, [data?.pages, updateCounter]);
+    // Sort replies
+    rootMessages.forEach(root => {
+      root.replies.sort((a, b) => a.created_at - b.created_at);
+    });
 
+    return rootMessages.sort((a, b) => b.created_at - a.created_at);
+  }, [data?.pages]);
+
+  // Infinite scroll
   useEffect(() => {
     if (inView && hasNextPage && !isFetchingNextPage) {
       fetchNextPage();
     }
   }, [inView, hasNextPage, isFetchingNextPage, fetchNextPage]);
 
-  // Refetch when filter changes
-  useEffect(() => {
-    refetch();
-  }, [filter, refetch]);
-
-  const toggleReplies = (messageId: string) => {
-    setExpandedReplies((prev) => {
-      const next = new Set(prev);
-      if (next.has(messageId)) {
-        next.delete(messageId);
-      } else {
-        next.add(messageId);
-      }
-      return next;
-    });
-  };
-
   if (status === "error") {
-    return <div>Error: {error.message}</div>;
+    return <div className="text-center text-destructive">Error: {error?.message}</div>;
   }
-
-  const hasMessages = data?.pages?.[0]?.length > 0;
-  const isLoading = status === "pending";
-  const isError = status === "error";
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-center -mt-6 mb-2">
-        <ToggleGroup
-          type="single"
-          value={filter}
-          onValueChange={(value) => value && setFilter(value as FeedFilter)}
-        >
-          <ToggleGroupItem value="global" aria-label="Global feed">
-            <Globe className="h-4 w-4 mr-2" />
-            Global
+      {/* Filter toggle */}
+      <div className="flex justify-center">
+        <ToggleGroup type="single" value={filter} onValueChange={(v) => v && setFilter(v as FeedFilter)}>
+          <ToggleGroupItem value="global">
+            <Globe className="h-4 w-4 mr-2" /> Global
           </ToggleGroupItem>
-          <ToggleGroupItem
-            value="following"
-            aria-label="Following feed"
-            disabled={!user}
-          >
-            <Users className="h-4 w-4 mr-2" />
-            Following
+          <ToggleGroupItem value="following" disabled={!user}>
+            <Users className="h-4 w-4 mr-2" /> Following
           </ToggleGroupItem>
         </ToggleGroup>
       </div>
 
+      {/* Messages */}
       <div className="space-y-4">
-        {isLoading ? (
-          <div className="flex justify-center">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900" />
+        {status === "pending" ? (
+          <div className="flex justify-center py-8">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
           </div>
-        ) : isError ? (
-          <div className="text-center text-red-500">Error loading messages</div>
+        ) : threadedMessages.length === 0 ? (
+          <div className="text-center py-8 text-muted-foreground">
+            {filter === "following" && !user
+              ? "Please log in to see messages from people you follow"
+              : filter === "following" && user
+              ? "No messages from people you follow yet"
+              : "No messages yet. Be the first to record a voice message!"}
+          </div>
         ) : (
           threadedMessages.map((message) => (
-            <div key={message.id} className="space-y-4">
+            <div key={message.id}>
               <VoiceMessagePost message={message} />
               {message.replies.length > 0 && (
-                <div className="ml-8">
+                <div className="ml-8 mt-2">
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="flex items-center gap-2 text-muted-foreground hover:text-foreground"
-                    onClick={() => toggleReplies(message.id)}
+                    onClick={() => setExpandedReplies(prev => {
+                      const next = new Set(prev);
+                      next.has(message.id) ? next.delete(message.id) : next.add(message.id);
+                      return next;
+                    })}
                   >
-                    {expandedReplies.has(message.id) ? (
-                      <ChevronUp className="h-4 w-4" />
-                    ) : (
-                      <ChevronDown className="h-4 w-4" />
-                    )}
-                    {message.replies.length}{" "}
-                    {message.replies.length === 1 ? "reply" : "replies"}
+                    {expandedReplies.has(message.id) ? <ChevronUp className="h-4 w-4 mr-1" /> : <ChevronDown className="h-4 w-4 mr-1" />}
+                    {message.replies.length} {message.replies.length === 1 ? 'reply' : 'replies'}
                   </Button>
                   {expandedReplies.has(message.id) && (
-                    <div className="mt-2 space-y-4 border-l-2 border-muted pl-4">
-                      {message.replies
-                        .sort((a, b) => a.created_at - b.created_at)
-                        .map((reply) => (
-                          <VoiceMessagePost key={reply.id} message={reply} />
-                        ))}
+                    <div className="mt-2 space-y-2 border-l-2 border-muted pl-4">
+                      {message.replies.map(reply => (
+                        <VoiceMessagePost key={reply.id} message={reply} />
+                      ))}
                     </div>
                   )}
                 </div>
@@ -458,19 +287,12 @@ export function VoiceMessageFeed() {
         )}
       </div>
 
-      <div ref={ref} className="h-12 w-full flex items-center justify-center">
+      {/* Load more trigger */}
+      <div ref={ref} className="h-12 flex items-center justify-center">
         {isFetchingNextPage ? (
-          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-900" />
-        ) : !hasNextPage && hasMessages ? (
-          <div className="text-sm text-muted-foreground">No more messages</div>
-        ) : !hasMessages ? (
-          <div className="text-sm text-muted-foreground">
-            {filter === "following" && !user
-              ? "Please log in to see messages from people you follow"
-              : filter === "following" && user
-              ? "No messages from people you follow yet"
-              : "No messages yet. Be the first to record a voice message!"}
-          </div>
+          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary" />
+        ) : !hasNextPage && threadedMessages.length > 0 ? (
+          <span className="text-sm text-muted-foreground">No more messages</span>
         ) : null}
       </div>
     </div>
