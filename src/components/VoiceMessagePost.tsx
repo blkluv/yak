@@ -4,6 +4,7 @@ import { Card } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
+  MessageSquare,
   Heart,
   Zap,
   Mic,
@@ -13,6 +14,7 @@ import {
   MoreVertical,
   Copy,
   Share2,
+  Hash,
 } from "lucide-react";
 import { useNostrPublish } from "@/hooks/useNostrPublish";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
@@ -37,8 +39,11 @@ import {
 import { uploadToBlossom, getBlossomServers } from "@/lib/blossom";
 import { nip19 } from "nostr-tools";
 import { useQueryClient } from "@tanstack/react-query";
-import { Link as RouterLink } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { useNWC } from "@/hooks/useNWC";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Link as RouterLink } from "react-router-dom";
 
 interface ThreadedNostrEvent extends NostrEvent {
   replies: ThreadedNostrEvent[];
@@ -51,6 +56,10 @@ interface QueryData {
 
 interface VoiceMessagePostProps {
   message: ThreadedNostrEvent;
+}
+
+function isHexId(id: string) {
+  return /^[0-9a-f]{64}$/i.test(id);
 }
 
 export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
@@ -68,59 +77,23 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   const [isRecording, setIsRecording] = useState(false);
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [hasReacted, setHasReacted] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
-  const [duration, setDuration] = useState<number | null>(null);
-
   const MAX_RECORDING_TIME = 60;
+  const [reactionCount, setReactionCount] = useState(0);
+  const [zapAmount, setZapAmount] = useState(0);
+  const [hasZapped, setHasZapped] = useState(false);
+  const [duration, setDuration] = useState<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const location = useLocation();
+  const isMessagePage = location.pathname.startsWith("/message/");
 
   const displayName = metadata?.name || message.pubkey.slice(0, 8);
   const profileImage = metadata?.picture;
+  const npub = nip19.npubEncode(message.pubkey);
 
   // -----------------------------
-  // Extract duration safely
-  // -----------------------------
-  useEffect(() => {
-    if (!message.content) return;
-
-    const audio = new Audio(message.content);
-
-    audio.onloadedmetadata = () => {
-      if (!isNaN(audio.duration)) {
-        setDuration(audio.duration);
-      }
-    };
-
-    audio.onerror = () => {
-      setDuration(null);
-    };
-  }, [message.content]);
-
-  // -----------------------------
-  // RECORDING TIMER
-  // -----------------------------
-  useEffect(() => {
-    let timer: NodeJS.Timeout;
-
-    if (isRecording) {
-      timer = setInterval(() => {
-        setRecordingTime((prev) => {
-          if (prev >= MAX_RECORDING_TIME) {
-            handleStopRecording();
-            return prev;
-          }
-          return prev + 1;
-        });
-      }, 1000);
-    }
-
-    return () => {
-      if (timer) clearInterval(timer);
-    };
-  }, [isRecording]);
-
-  // -----------------------------
-  // START RECORDING (Safari Safe)
+  // SAFE RECORDING (FIXED)
   // -----------------------------
   const handleStartRecording = async () => {
     if (!user) return;
@@ -148,6 +121,7 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
 
         const url = URL.createObjectURL(blob);
         setPreviewUrl(url);
+
         stream.getTracks().forEach((t) => t.stop());
       };
 
@@ -155,16 +129,16 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
       setMediaRecorder(recorder);
       setIsRecording(true);
       setRecordingTime(0);
-    } catch (err) {
-      toast.error("Microphone access failed");
+    } catch (error) {
+      toast.error("Failed to access microphone");
     }
   };
 
   const handleStopRecording = () => {
     if (mediaRecorder && mediaRecorder.state === "recording") {
       mediaRecorder.stop();
-      setIsRecording(false);
       setMediaRecorder(null);
+      setIsRecording(false);
     }
   };
 
@@ -175,11 +149,11 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   };
 
   // -----------------------------
-  // PUBLISH REPLY (FIXED MIME)
+  // FIXED PUBLISH (NO VIDEO MIME)
   // -----------------------------
   const handlePublishReply = async () => {
     if (!previewUrl || !user?.pubkey || !user.signer) {
-      toast.error("Record first");
+      toast.error("Please record first");
       return;
     }
 
@@ -194,7 +168,6 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
       });
 
       const audio = new Audio(URL.createObjectURL(cleanBlob));
-
       const duration = await new Promise<number>((resolve, reject) => {
         audio.onloadedmetadata = () => resolve(audio.duration);
         audio.onerror = reject;
@@ -223,19 +196,19 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
         },
         {
           onSuccess: () => {
-            toast.success("Reply published");
             handleDiscardRecording();
             setIsReplyDialogOpen(false);
+            toast.success("Voice reply published");
             setIsProcessing(false);
           },
           onError: () => {
-            toast.error("Publish failed");
+            toast.error("Publishing failed");
             setIsProcessing(false);
           },
         }
       );
-    } catch (err) {
-      toast.error("Failed to publish reply");
+    } catch (error) {
+      toast.error("Failed to publish");
       setIsProcessing(false);
     }
   };
@@ -243,7 +216,7 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   return (
     <Card className="p-4">
       <div className="flex items-start space-x-4">
-        <RouterLink to="#">
+        <RouterLink to={`/profile/${npub}`}>
           <Avatar className="h-10 w-10">
             <AvatarImage src={profileImage} />
             <AvatarFallback>
@@ -260,7 +233,7 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
             </span>
           </div>
 
-          {/* AUDIO PLAYER (NO FORCED TYPE) */}
+          {/* FIXED PLAYER (NO FORCED TYPE) */}
           <div className="mt-2">
             <audio
               controls
@@ -270,7 +243,6 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
             />
           </div>
 
-          {/* ACTIONS */}
           <div className="mt-4 flex items-center gap-6">
             <Dialog
               open={isReplyDialogOpen}
@@ -304,7 +276,7 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
                     ) : (
                       <>
                         <Mic className="mr-2 h-4 w-4" />
-                        Record
+                        Record Reply
                       </>
                     )}
                   </Button>
@@ -312,8 +284,8 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
                   <>
                     <audio
                       controls
-                      src={previewUrl}
                       className="w-full"
+                      src={previewUrl}
                     />
                     <div className="flex gap-2 mt-4">
                       <Button
@@ -337,6 +309,14 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
                 )}
               </DialogContent>
             </Dialog>
+
+            <Button variant="ghost" size="sm">
+              <Heart className="h-5 w-5" />
+            </Button>
+
+            <Button variant="ghost" size="sm">
+              <Zap className="h-5 w-5" />
+            </Button>
           </div>
         </div>
       </div>
