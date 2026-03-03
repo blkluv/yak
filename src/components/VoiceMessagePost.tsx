@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useRef } from "react";
 import { NostrEvent } from "@nostrify/nostrify";
 import { useNostrPublish } from "@/hooks/useNostrPublish";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
@@ -19,57 +19,51 @@ export function VoiceMessagePost({ message }: Props) {
   const { nostr } = useNostr();
   const { mutate: publishEvent } = useNostrPublish();
 
-  const [isRecording, setIsRecording] = useState(false);
-  const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [audioBlobState, setAudioBlobState] = useState<Blob | null>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  // 🎤 START RECORDING (Safari Safe)
+  const [showReply, setShowReply] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
+  const [audioBlobState, setAudioBlobState] = useState<Blob | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  // ---------- RECORD ----------
   const handleStartRecording = async () => {
     if (!user) return;
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm")
-        ? "audio/webm"
-        : MediaRecorder.isTypeSupported("audio/mp4")
-        ? "audio/mp4"
-        : "";
+    const mimeType = MediaRecorder.isTypeSupported("audio/webm")
+      ? "audio/webm"
+      : MediaRecorder.isTypeSupported("audio/mp4")
+      ? "audio/mp4"
+      : "";
 
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-      const chunks: Blob[] = [];
+    const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+    const chunks: Blob[] = [];
 
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunks.push(event.data);
-      };
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunks.push(e.data);
+    };
 
-      recorder.onstop = () => {
-        const blob = new Blob(chunks, {
-          type: recorder.mimeType || "audio/webm",
-        });
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, {
+        type: recorder.mimeType || "audio/webm",
+      });
 
-        const url = URL.createObjectURL(blob);
-        setAudioBlobState(blob);
-        setPreviewUrl(url);
+      setAudioBlobState(blob);
+      setPreviewUrl(URL.createObjectURL(blob));
+      stream.getTracks().forEach((t) => t.stop());
+    };
 
-        stream.getTracks().forEach((t) => t.stop());
-      };
-
-      recorder.start();
-      setMediaRecorder(recorder);
-      setIsRecording(true);
-    } catch (err) {
-      console.error(err);
-      toast.error("Microphone access failed");
-    }
+    recorder.start();
+    setMediaRecorder(recorder);
+    setIsRecording(true);
   };
 
   const handleStopRecording = () => {
-    if (mediaRecorder && mediaRecorder.state === "recording") {
+    if (mediaRecorder) {
       mediaRecorder.stop();
       setMediaRecorder(null);
       setIsRecording(false);
@@ -82,106 +76,99 @@ export function VoiceMessagePost({ message }: Props) {
     setAudioBlobState(null);
   };
 
-  // 🚀 PUBLISH REPLY (FIXED)
+  // ---------- PUBLISH ----------
   const handlePublishReply = async () => {
-    if (!audioBlobState || !user?.pubkey || !user.signer) {
-      toast.error("Please record first");
-      return;
-    }
+    if (!audioBlobState || !user?.pubkey || !user.signer) return;
 
     setIsProcessing(true);
 
-    try {
-      // Extract duration safely
-      const audio = new Audio(URL.createObjectURL(audioBlobState));
-
-      const duration = await new Promise<number>((resolve, reject) => {
-        const timeout = setTimeout(() => reject("timeout"), 5000);
-
-        audio.onloadedmetadata = () => {
-          clearTimeout(timeout);
-          resolve(audio.duration);
-        };
-
-        audio.onerror = () => {
-          clearTimeout(timeout);
-          reject("audio load error");
-        };
-      });
-
-      URL.revokeObjectURL(audio.src);
-
-      const blossomServers = await getBlossomServers(nostr, user.pubkey);
-      if (!blossomServers.length) throw new Error("No blossom servers");
-
-      // ✅ Correct MIME type preserved
-      const audioUrl = await uploadToBlossom(
-        audioBlobState,
-        blossomServers,
-        user.pubkey,
-        user.signer
-      );
-
-      const rootTag = message.tags.find(
-        (t) => t[0] === "e" && t[3] === "root"
-      );
-      const rootId = rootTag ? rootTag[1] : message.id;
-
-      publishEvent(
-        {
-          kind: 1222,
-          content: audioUrl,
-          tags: [
-            ["e", rootId, "", "root"],
-            ["e", message.id, "", "reply"],
-            ["p", message.pubkey],
-            ["duration", Math.round(duration).toString()],
-          ],
-        },
-        {
-          onSuccess: () => {
-            toast.success("Reply published");
-            handleDiscard();
-            setIsProcessing(false);
-          },
-          onError: () => {
-            toast.error("Publish failed");
-            setIsProcessing(false);
-          },
-        }
-      );
-    } catch (err) {
-      console.error(err);
-      toast.error("Failed to publish");
-      setIsProcessing(false);
+    const blossomServers = await getBlossomServers(nostr, user.pubkey);
+    if (!blossomServers.length) {
+      toast.error("No blossom servers");
+      return;
     }
+
+    const audioUrl = await uploadToBlossom(
+      audioBlobState,
+      blossomServers,
+      user.pubkey,
+      user.signer
+    );
+
+    publishEvent(
+      {
+        kind: 1222,
+        content: audioUrl,
+        tags: [
+          ["e", message.id, "", "root"],
+          ["e", message.id, "", "reply"],
+          ["p", message.pubkey],
+        ],
+      },
+      {
+        onSuccess: () => {
+          toast.success("Reply published");
+          handleDiscard();
+          setShowReply(false);
+          setIsProcessing(false);
+        },
+        onError: () => {
+          toast.error("Publish failed");
+          setIsProcessing(false);
+        },
+      }
+    );
   };
 
   return (
-    <div className="space-y-4">
-      {/* Existing audio */}
+    <div className="space-y-3 border rounded-lg p-4">
+      {/* Main Audio */}
       <audio
-        controls
-        src={message.content}
-        className="w-full"
         ref={audioRef}
+        src={message.content}
+        controls
+        className="w-full"
       />
 
-      {/* Reply recorder */}
-      {!previewUrl ? (
-        <button onClick={isRecording ? handleStopRecording : handleStartRecording}>
-          {isRecording ? "Stop Recording" : "Record Reply"}
-        </button>
-      ) : (
-        <>
-          <audio controls src={previewUrl} className="w-full" />
-          <div className="flex gap-2">
-            <button onClick={handlePublishReply} disabled={isProcessing}>
-              Publish Reply
+      {/* Reply Button */}
+      <button
+        onClick={() => setShowReply((prev) => !prev)}
+        className="text-sm text-blue-600"
+      >
+        Reply
+      </button>
+
+      {/* Reply Section */}
+      {showReply && (
+        <div className="space-y-2">
+          {!previewUrl ? (
+            <button
+              onClick={isRecording ? handleStopRecording : handleStartRecording}
+              className="bg-pink-500 text-white px-4 py-2 rounded"
+            >
+              {isRecording ? "Stop Recording" : "Record Reply"}
             </button>
-            <button onClick={handleDiscard}>Discard</button>
-          </div>
-        </>
+          ) : (
+            <>
+              <audio src={previewUrl} controls className="w-full" />
+              <div className="flex gap-2">
+                <button
+                  onClick={handlePublishReply}
+                  disabled={isProcessing}
+                  className="bg-green-500 text-white px-4 py-2 rounded"
+                >
+                  Publish
+                </button>
+                <button
+                  onClick={handleDiscard}
+                  className="bg-gray-400 px-4 py-2 rounded"
+                >
+                  Discard
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       )}
     </div>
   );
