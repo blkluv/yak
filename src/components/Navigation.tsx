@@ -19,7 +19,7 @@ export function Navigation() {
             <div className="leading-tight">
               <div className="text-lg font-bold">ATL5D</div>
               <div className="text-xs text-gray-500 hidden sm:block">
-                The audio reality show you monetize.
+                "South got something to say"
               </div>
             </div>
           </Link>
