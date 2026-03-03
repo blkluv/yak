@@ -14,7 +14,6 @@ interface BlobDescriptor {
   uploaded: number;
 }
 
-// Default blossom server - you can replace this with your preferred server
 const DEFAULT_BLOSSOM_SERVER: BlossomServer = {
   url: "https://blossom.band",
   pubkey: "npub1blossomserver",
@@ -22,7 +21,6 @@ const DEFAULT_BLOSSOM_SERVER: BlossomServer = {
 
 function isValidUrl(url: string): boolean {
   try {
-    // Fix common URL issues
     let fixedUrl = url;
     if (url.includes("/net/")) {
       fixedUrl = url.replace("/net/", ".net/");
@@ -63,7 +61,6 @@ async function createAuthorizationEvent(
     ["expiration", (now + expirationHours * 3600).toString()],
   ];
 
-  // Add SHA256 tag for upload and delete operations
   if (sha256 && (verb === "upload" || verb === "delete")) {
     tags.push(["x", sha256]);
   }
@@ -76,7 +73,6 @@ async function createAuthorizationEvent(
     pubkey,
   });
 
-  // Debug log the event
   console.log("Authorization event:", JSON.stringify(event, null, 2));
   return event;
 }
@@ -87,7 +83,6 @@ export async function uploadToBlossom(
   userPubkey?: string,
   signer?: { signEvent: (event: Partial<NostrEvent>) => Promise<NostrEvent> }
 ): Promise<string> {
-  // Filter out invalid URLs and ensure we have at least one valid server
   const validServers = servers
     .map((server) => ({
       ...server,
@@ -107,36 +102,38 @@ export async function uploadToBlossom(
     throw new Error("Signer is required for upload authorization");
   }
 
-  // Calculate SHA256 hash of the blob
   const sha256 = await calculateSHA256(blob);
   console.log("Blob SHA256:", sha256);
 
-  // Create and sign the authorization event
+  // ✅ Dynamic extension fix
+  const extension =
+    blob.type.includes("mp4")
+      ? "mp4"
+      : blob.type.includes("webm")
+      ? "webm"
+      : "dat";
+
   const authEvent = await createAuthorizationEvent(
     "upload",
-    `Upload voice-message.webm`,
+    `Upload voice-message.${extension}`,
     userPubkey,
     signer,
     sha256
   );
 
-  // Base64 encode the authorization event
   const authHeader = `Nostr ${btoa(JSON.stringify(authEvent))}`;
   console.log("Authorization header:", authHeader);
 
-  // Try each server in sequence until one succeeds
   for (const server of validServers) {
     try {
       const uploadUrl = new URL("/upload", server.url).toString();
       console.log("Attempting upload to:", uploadUrl);
 
-      // Upload the blob
       const response = await fetch(uploadUrl, {
         method: "PUT",
         body: blob,
         headers: {
           "Content-Type": blob.type,
-          "Content-Length": blob.size.toString(),
           Accept: "application/json",
           Authorization: authHeader,
           Origin: window.location.origin,
@@ -152,33 +149,33 @@ export async function uploadToBlossom(
             reason ? ` - ${reason}` : ""
           } for ${uploadUrl}`
         );
-        // Try to get more error details
+
         try {
           const errorData = await response.text();
           console.log("Error response:", errorData);
-        } catch (e) {
+        } catch {
           console.log("Could not read error response");
         }
-        continue; // Try next server
+
+        continue;
       }
 
       const data: BlobDescriptor = await response.json();
 
       if (!data.url) {
         console.log("No URL returned from server for", uploadUrl);
-        continue; // Try next server
+        continue;
       }
 
-      // Verify the SHA256 matches
       if (data.sha256 !== sha256) {
         console.log("Server returned different SHA256 hash:", data.sha256);
-        continue; // Try next server
+        continue;
       }
 
       return data.url;
     } catch (error) {
       console.error(`Failed to upload to ${server.url}:`, error);
-      continue; // Try next server
+      continue;
     }
   }
 
@@ -198,7 +195,6 @@ export async function getBlossomServers(
       return [DEFAULT_BLOSSOM_SERVER];
     }
 
-    // Query for blossom server events (kind 10063)
     const blossomEvents = await nostr.query([
       {
         kinds: [10063],
@@ -207,9 +203,8 @@ export async function getBlossomServers(
       },
     ]);
 
-    console.log("Found blossom events:", blossomEvents); // Debug log
+    console.log("Found blossom events:", blossomEvents);
 
-    // If no blossom servers are found, return the default server
     if (!blossomEvents.length) {
       console.log(
         "No blossom servers found, using default server:",
@@ -218,7 +213,6 @@ export async function getBlossomServers(
       return [DEFAULT_BLOSSOM_SERVER];
     }
 
-    // Extract server URLs from the 'server' tags and fix any malformed URLs
     const servers = blossomEvents
       .flatMap((event: NostrEvent) =>
         event.tags
@@ -230,7 +224,6 @@ export async function getBlossomServers(
       )
       .filter((server) => isValidUrl(server.url));
 
-    // If no valid servers were found, use the default
     if (servers.length === 0) {
       console.log(
         "No valid blossom servers found in events, using default server:",
@@ -243,10 +236,10 @@ export async function getBlossomServers(
       "Found blossom servers:",
       servers.map((s) => s.url)
     );
+
     return servers;
   } catch (error) {
     console.error("Error fetching blossom servers:", error);
-    // Return default server if query fails
     return [DEFAULT_BLOSSOM_SERVER];
   }
 }
