@@ -3,30 +3,27 @@ import { LoginArea } from "@/components/auth/LoginArea";
 
 export function Navigation() {
   return (
-    <nav className="border-b bg-white sticky top-0 z-50">
-      <div className="container mx-auto px-4">
-
-        {/* TOP BAR */}
+    <nav className="sticky top-0 z-50 w-full border-b bg-white">
+      <div className="w-full max-w-7xl mx-auto px-4">
         <div className="h-16 flex items-center justify-between">
 
-          {/* Logo + Tagline */}
-          <Link to="/" className="flex items-center space-x-3">
+          {/* Logo */}
+          <Link to="/" className="flex items-center space-x-3 min-w-0">
             <img
               src="/yakbak-logo.png"
               alt="ATL5D Logo"
-              className="h-8 w-auto"
+              className="h-8 w-auto flex-shrink-0"
             />
-            <div className="leading-tight">
+            <div className="leading-tight truncate">
               <div className="text-lg font-bold">ATL5D</div>
               <div className="text-xs text-gray-500 hidden sm:block">
-                "South got something to say"
+                South got something to say
               </div>
             </div>
           </Link>
 
           {/* Desktop Nav */}
           <div className="hidden md:flex items-center gap-6 text-sm font-medium">
-
             <a
               href="https://t.atl5d.com"
               target="_blank"
@@ -66,13 +63,12 @@ export function Navigation() {
             <LoginArea />
           </div>
 
-          {/* Mobile Login Only */}
-          <div className="md:hidden">
+          {/* Mobile */}
+          <div className="md:hidden flex items-center">
             <LoginArea />
           </div>
 
         </div>
-
       </div>
     </nav>
   );
