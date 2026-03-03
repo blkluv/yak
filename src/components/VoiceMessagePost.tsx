@@ -8,7 +8,7 @@ import { useNostrPublish } from "@/hooks/useNostrPublish";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useNostr } from "@nostrify/react";
 import { toast } from "sonner";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
   Dialog,
   DialogContent,
@@ -40,6 +40,7 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   const [isRecording, setIsRecording] = useState(false);
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [playbackError, setPlaybackError] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -47,65 +48,109 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   const profileImage = metadata?.picture;
   const npub = nip19.npubEncode(message.pubkey);
 
+  // ✅ FIX 1: Handle audio playback errors
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.onerror = () => {
+        console.error("Audio playback failed for:", message.content);
+        setPlaybackError(true);
+      };
+    }
+  }, [message.content]);
+
   // --------------------------------------------------
-  // 🎤 RECORDING (FORCE STABLE MIME)
+  // 🎤 RECORDING (WITH MIME TYPE DETECTION)
   // --------------------------------------------------
+
+  const getSupportedMimeType = () => {
+    const types = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/mp4",
+      "audio/mpeg",
+      "audio/wav",
+    ];
+    
+    for (const type of types) {
+      if (MediaRecorder.isTypeSupported(type)) {
+        console.log("Using mime type:", type);
+        return type;
+      }
+    }
+    return undefined; // Let browser decide
+  };
 
   const handleStartRecording = async () => {
-  if (!user) return;
+    if (!user) return;
 
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-    });
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: 48000,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      });
 
-    // ❌ DO NOT force mimeType on iOS
-    const recorder = new MediaRecorder(stream);
+      const mimeType = getSupportedMimeType();
+      const options = mimeType ? { mimeType } : undefined;
+      
+      const recorder = new MediaRecorder(stream, options);
+      const chunks: Blob[] = [];
 
-    const chunks: Blob[] = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunks.push(event.data);
+        }
+      };
 
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        chunks.push(event.data);
-      }
-    };
+      recorder.onstop = () => {
+        // ✅ FIX 2: Preserve the original MIME type
+        const mimeType = recorder.mimeType || "audio/webm";
+        const blob = new Blob(chunks, { type: mimeType });
 
-    recorder.onstop = () => {
-      const blob = new Blob(chunks); // Let browser decide type
+        console.log("✅ Recorded blob:", {
+          type: blob.type,
+          size: blob.size,
+          chunks: chunks.length,
+        });
 
-      console.log("Blob type:", blob.type);
-      console.log("Blob size:", blob.size);
+        const url = URL.createObjectURL(blob);
+        setPreviewUrl(url);
 
-      const url = URL.createObjectURL(blob);
-      setPreviewUrl(url);
+        stream.getTracks().forEach((track) => track.stop());
+      };
 
-      stream.getTracks().forEach((track) => track.stop());
-    };
+      recorder.start(1000); // Collect in 1-second chunks
+      setMediaRecorder(recorder);
+      setIsRecording(true);
+      
+      toast.success("Recording started");
+    } catch (err) {
+      console.error("Recording failed:", err);
+      toast.error("Microphone access failed");
+    }
+  };
 
-    recorder.start();
-
-    setMediaRecorder(recorder);
-    setIsRecording(true);
-  } catch (err) {
-    console.error(err);
-    toast.error("Microphone failed");
-  }
-};
   const handleStopRecording = () => {
     if (mediaRecorder && mediaRecorder.state === "recording") {
       mediaRecorder.stop();
       setMediaRecorder(null);
       setIsRecording(false);
+      toast.success("Recording stopped");
     }
   };
 
   const handleDiscard = () => {
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-    setPreviewUrl(null);
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl);
+      setPreviewUrl(null);
+    }
   };
 
   // --------------------------------------------------
-  // 🚀 PUBLISH
+  // 🚀 PUBLISH WITH PROPER MIME TYPE
   // --------------------------------------------------
 
   const handlePublishReply = async () => {
@@ -118,16 +163,18 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
 
     try {
       const response = await fetch(previewUrl);
-      const rawBlob = await response.blob();
+      const blob = await response.blob();
 
-      const cleanBlob = new Blob([rawBlob], {
-        type: rawBlob.type || "audio/mp4",
+      // ✅ FIX 3: Don't modify the blob - preserve original MIME type
+      console.log("📤 Uploading audio:", {
+        type: blob.type,
+        size: blob.size,
       });
 
       const blossomServers = await getBlossomServers(nostr, user.pubkey);
 
       const audioUrl = await uploadToBlossom(
-        cleanBlob,
+        blob, // Use original blob, don't recreate
         blossomServers,
         user.pubkey,
         user.signer
@@ -150,17 +197,57 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
             toast.success("Voice reply published");
             setIsProcessing(false);
           },
-          onError: () => {
+          onError: (error) => {
+            console.error("Publish failed:", error);
             toast.error("Publish failed");
             setIsProcessing(false);
           },
         }
       );
     } catch (error) {
-      console.error(error);
+      console.error("Upload failed:", error);
       toast.error("Upload failed");
       setIsProcessing(false);
     }
+  };
+
+  // --------------------------------------------------
+  // 🎧 AUDIO PLAYBACK WITH FALLBACK
+  // --------------------------------------------------
+
+  const renderAudioPlayer = () => {
+    if (playbackError) {
+      return (
+        <div className="mt-2 p-2 bg-destructive/10 rounded">
+          <p className="text-sm text-destructive">
+            Audio format not supported. 
+            <Button 
+              variant="link" 
+              className="ml-2 p-0 h-auto"
+              onClick={() => window.open(message.content, '_blank')}
+            >
+              Download instead
+            </Button>
+          </p>
+        </div>
+      );
+    }
+
+    return (
+      <div className="mt-2">
+        <audio 
+          controls 
+          className="w-full" 
+          ref={audioRef}
+          preload="metadata"
+        >
+          <source src={message.content} type="audio/webm" />
+          <source src={message.content} type="audio/mp4" />
+          <source src={message.content} type="audio/mpeg" />
+          Your browser does not support the audio element.
+        </audio>
+      </div>
+    );
   };
 
   // --------------------------------------------------
@@ -187,13 +274,8 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
             </span>
           </div>
 
-          {/* 🔥 FIXED PLAYER */}
-          <div className="mt-2">
-            <audio controls className="w-full" ref={audioRef}>
-              <source src={message.content} />
-              Your browser does not support the audio element.
-            </audio>
-          </div>
+          {/* ✅ FIXED AUDIO PLAYER */}
+          {renderAudioPlayer()}
 
           <div className="mt-4 flex items-center gap-6">
             <Dialog
@@ -212,26 +294,34 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
                 </DialogHeader>
 
                 {!previewUrl ? (
-                  <Button
-                    onClick={
-                      isRecording
-                        ? handleStopRecording
-                        : handleStartRecording
-                    }
-                    className="w-full"
-                  >
-                    {isRecording ? (
-                      <>
-                        <MicOff className="mr-2 h-4 w-4" />
-                        Stop Recording
-                      </>
-                    ) : (
-                      <>
-                        <Mic className="mr-2 h-4 w-4" />
-                        Record Reply
-                      </>
+                  <div className="space-y-4">
+                    <Button
+                      onClick={
+                        isRecording
+                          ? handleStopRecording
+                          : handleStartRecording
+                      }
+                      className="w-full"
+                      variant={isRecording ? "destructive" : "default"}
+                    >
+                      {isRecording ? (
+                        <>
+                          <MicOff className="mr-2 h-4 w-4" />
+                          Stop Recording
+                        </>
+                      ) : (
+                        <>
+                          <Mic className="mr-2 h-4 w-4" />
+                          Record Reply
+                        </>
+                      )}
+                    </Button>
+                    {isRecording && (
+                      <p className="text-sm text-center text-muted-foreground">
+                        Recording... Speak now
+                      </p>
                     )}
-                  </Button>
+                  </div>
                 ) : (
                   <>
                     <audio controls className="w-full">
@@ -245,13 +335,14 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
                         className="flex-1"
                       >
                         <Play className="mr-2 h-4 w-4" />
-                        Publish
+                        {isProcessing ? "Publishing..." : "Publish"}
                       </Button>
 
                       <Button
                         onClick={handleDiscard}
                         variant="destructive"
                         className="flex-1"
+                        disabled={isProcessing}
                       >
                         <Trash2 className="mr-2 h-4 w-4" />
                         Discard
