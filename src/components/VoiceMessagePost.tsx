@@ -41,95 +41,196 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [playbackError, setPlaybackError] = useState(false);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [recordingDuration, setRecordingDuration] = useState(0);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const animationFrameRef = useRef<number>();
+  const durationIntervalRef = useRef<ReturnType<typeof setInterval>>();
 
   const displayName = metadata?.name || message.pubkey.slice(0, 8);
   const profileImage = metadata?.picture;
   const npub = nip19.npubEncode(message.pubkey);
 
-  // ✅ FIX 1: Handle audio playback errors
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+      }
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      if (durationIntervalRef.current) {
+        clearInterval(durationIntervalRef.current);
+      }
+    };
+  }, [previewUrl]);
+
+  // Handle audio playback errors
   useEffect(() => {
     if (audioRef.current) {
       audioRef.current.onerror = () => {
-        console.error("Audio playback failed for:", message.content);
+        console.error("Audio playback failed");
         setPlaybackError(true);
       };
     }
   }, [message.content]);
 
-  // --------------------------------------------------
-  // 🎤 RECORDING (WITH MIME TYPE DETECTION)
-  // --------------------------------------------------
+  // ============================================
+  // AUDIO LEVEL METER
+  // ============================================
 
-  const getSupportedMimeType = () => {
-    const types = [
-      "audio/webm;codecs=opus",
-      "audio/webm",
-      "audio/mp4",
-      "audio/mpeg",
-      "audio/wav",
-    ];
-    
-    for (const type of types) {
-      if (MediaRecorder.isTypeSupported(type)) {
-        console.log("Using mime type:", type);
-        return type;
-      }
-    }
-    return undefined; // Let browser decide
+  const setupAudioMeter = (stream: MediaStream) => {
+    const audioContext = new AudioContext();
+    const source = audioContext.createMediaStreamSource(stream);
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+    analyserRef.current = analyser;
+
+    const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    const updateLevel = () => {
+      if (!analyserRef.current) return;
+      analyserRef.current.getByteFrequencyData(dataArray);
+      const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+      setAudioLevel(average / 255); // Normalize to 0-1
+      animationFrameRef.current = requestAnimationFrame(updateLevel);
+    };
+
+    updateLevel();
   };
 
+  // ============================================
+  // RECORDING FUNCTIONS
+  // ============================================
+
   const handleStartRecording = async () => {
-    if (!user) return;
+    if (!user) {
+      toast.error("Please login first");
+      return;
+    }
 
     try {
+      // Request microphone with specific constraints for better quality
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
           sampleRate: 48000,
           echoCancellation: true,
           noiseSuppression: true,
+          autoGainControl: true,
         },
       });
 
-      const mimeType = getSupportedMimeType();
-      const options = mimeType ? { mimeType } : undefined;
+      streamRef.current = stream;
       
-      const recorder = new MediaRecorder(stream, options);
+      // Setup audio level meter
+      setupAudioMeter(stream);
+
+      // Determine best MIME type
+      const mimeTypes = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+        'audio/ogg;codecs=opus',
+      ];
+
+      let selectedMimeType = '';
+      for (const type of mimeTypes) {
+        if (MediaRecorder.isTypeSupported(type)) {
+          selectedMimeType = type;
+          break;
+        }
+      }
+
+      console.log('Using MIME type:', selectedMimeType || 'browser default');
+
+      // Create recorder with options
+      const recorder = new MediaRecorder(stream, {
+        mimeType: selectedMimeType || undefined,
+        audioBitsPerSecond: 128000, // 128 kbps for good quality
+      });
+
       const chunks: Blob[] = [];
 
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           chunks.push(event.data);
+          console.log(`Chunk received: ${event.data.size} bytes`);
         }
       };
 
       recorder.onstop = () => {
-        // ✅ FIX 2: Preserve the original MIME type
-        const mimeType = recorder.mimeType || "audio/webm";
-        const blob = new Blob(chunks, { type: mimeType });
+        console.log(`Recording stopped. Total chunks: ${chunks.length}`);
+        
+        if (chunks.length === 0) {
+          toast.error("No audio data recorded");
+          return;
+        }
 
-        console.log("✅ Recorded blob:", {
-          type: blob.type,
+        // Create blob with proper MIME type
+        const blob = new Blob(chunks, { 
+          type: selectedMimeType || 'audio/webm' 
+        });
+
+        console.log('Final blob:', {
           size: blob.size,
+          type: blob.type,
           chunks: chunks.length,
         });
 
+        if (blob.size < 100) {
+          toast.error("Recording too short or no audio detected");
+          return;
+        }
+
+        // Create preview URL
         const url = URL.createObjectURL(blob);
         setPreviewUrl(url);
 
-        stream.getTracks().forEach((track) => track.stop());
+        // Test playback
+        const testAudio = new Audio(url);
+        testAudio.oncanplaythrough = () => {
+          console.log('Preview audio can play');
+        };
+        testAudio.onerror = (e) => {
+          console.error('Preview audio error:', e);
+          toast.error("Recording may be corrupted");
+        };
+
+        // Cleanup stream
+        stream.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
+
+        // Stop audio meter
+        if (animationFrameRef.current) {
+          cancelAnimationFrame(animationFrameRef.current);
+        }
+        setAudioLevel(0);
       };
 
-      recorder.start(1000); // Collect in 1-second chunks
+      recorder.start(1000); // Collect data every second
       setMediaRecorder(recorder);
       setIsRecording(true);
-      
+
+      // Start duration timer
+      setRecordingDuration(0);
+      durationIntervalRef.current = setInterval(() => {
+        setRecordingDuration(prev => prev + 1);
+      }, 1000);
+
       toast.success("Recording started");
+
     } catch (err) {
-      console.error("Recording failed:", err);
-      toast.error("Microphone access failed");
+      console.error("Failed to start recording:", err);
+      toast.error("Could not access microphone");
     }
   };
 
@@ -138,6 +239,11 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
       mediaRecorder.stop();
       setMediaRecorder(null);
       setIsRecording(false);
+
+      if (durationIntervalRef.current) {
+        clearInterval(durationIntervalRef.current);
+      }
+
       toast.success("Recording stopped");
     }
   };
@@ -147,11 +253,17 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
       URL.revokeObjectURL(previewUrl);
       setPreviewUrl(null);
     }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    setAudioLevel(0);
+    setRecordingDuration(0);
   };
 
-  // --------------------------------------------------
-  // 🚀 PUBLISH WITH PROPER MIME TYPE
-  // --------------------------------------------------
+  // ============================================
+  // PUBLISH FUNCTIONS
+  // ============================================
 
   const handlePublishReply = async () => {
     if (!previewUrl || !user?.pubkey || !user.signer) {
@@ -162,24 +274,34 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
     setIsProcessing(true);
 
     try {
+      // Fetch the recorded blob
       const response = await fetch(previewUrl);
       const blob = await response.blob();
 
-      // ✅ FIX 3: Don't modify the blob - preserve original MIME type
-      console.log("📤 Uploading audio:", {
-        type: blob.type,
+      console.log("Publishing audio:", {
         size: blob.size,
+        type: blob.type,
       });
 
-      const blossomServers = await getBlossomServers(nostr, user.pubkey);
+      if (blob.size < 100) {
+        throw new Error("Recording too short or empty");
+      }
 
+      // Get blossom servers
+      const blossomServers = await getBlossomServers(nostr, user.pubkey);
+      console.log("Blossom servers:", blossomServers);
+
+      // Upload to blossom
       const audioUrl = await uploadToBlossom(
-        blob, // Use original blob, don't recreate
+        blob,
         blossomServers,
         user.pubkey,
         user.signer
       );
 
+      console.log("Upload successful, URL:", audioUrl);
+
+      // Publish to Nostr
       publishEvent(
         {
           kind: 1222,
@@ -199,63 +321,66 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
           },
           onError: (error) => {
             console.error("Publish failed:", error);
-            toast.error("Publish failed");
+            toast.error("Failed to publish");
             setIsProcessing(false);
           },
         }
       );
+
     } catch (error) {
       console.error("Upload failed:", error);
-      toast.error("Upload failed");
+      toast.error(error instanceof Error ? error.message : "Upload failed");
       setIsProcessing(false);
     }
   };
 
-  // --------------------------------------------------
-  // 🎧 AUDIO PLAYBACK WITH FALLBACK
-  // --------------------------------------------------
+  // ============================================
+  // RENDER FUNCTIONS
+  // ============================================
+
+  const formatDuration = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
 
   const renderAudioPlayer = () => {
     if (playbackError) {
       return (
-        <div className="mt-2 p-2 bg-destructive/10 rounded">
-          <p className="text-sm text-destructive">
-            Audio format not supported. 
-            <Button 
-              variant="link" 
-              className="ml-2 p-0 h-auto"
-              onClick={() => window.open(message.content, '_blank')}
-            >
-              Download instead
-            </Button>
-          </p>
+        <div className="mt-2 p-3 bg-destructive/10 rounded-md">
+          <p className="text-sm text-destructive">Audio format not supported</p>
+          <Button
+            variant="link"
+            size="sm"
+            className="mt-1"
+            onClick={() => window.open(message.content, '_blank')}
+          >
+            Download instead
+          </Button>
         </div>
       );
     }
 
     return (
       <div className="mt-2">
-        <audio 
-          controls 
-          className="w-full" 
+        <audio
           ref={audioRef}
+          controls
+          className="w-full"
           preload="metadata"
+          onError={() => setPlaybackError(true)}
         >
           <source src={message.content} type="audio/webm" />
           <source src={message.content} type="audio/mp4" />
           <source src={message.content} type="audio/mpeg" />
-          Your browser does not support the audio element.
+          Your browser does not support audio.
         </audio>
       </div>
     );
   };
 
-  // --------------------------------------------------
-  // UI
-  // --------------------------------------------------
-
   return (
-    <Card className="p-4">
+    <Card className="p-4 mb-4">
       <div className="flex items-start space-x-4">
         <RouterLink to={`/profile/${npub}`}>
           <Avatar className="h-10 w-10">
@@ -274,61 +399,73 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
             </span>
           </div>
 
-          {/* ✅ FIXED AUDIO PLAYER */}
           {renderAudioPlayer()}
 
-          <div className="mt-4 flex items-center gap-6">
+          <div className="mt-4 flex items-center gap-2">
             <Dialog
               open={isReplyDialogOpen}
               onOpenChange={setIsReplyDialogOpen}
             >
               <DialogTrigger asChild>
                 <Button variant="ghost" size="sm">
-                  <Mic className="h-5 w-5" />
+                  <Mic className="h-4 w-4 mr-1" />
+                  Reply
                 </Button>
               </DialogTrigger>
 
-              <DialogContent>
+              <DialogContent className="sm:max-w-md">
                 <DialogHeader>
                   <DialogTitle>Voice Reply</DialogTitle>
                 </DialogHeader>
 
                 {!previewUrl ? (
-                  <div className="space-y-4">
+                  <div className="space-y-4 py-4">
+                    {isRecording && (
+                      <div className="space-y-2">
+                        <div className="flex justify-between text-sm">
+                          <span>Recording...</span>
+                          <span>{formatDuration(recordingDuration)}</span>
+                        </div>
+                        
+                        {/* Audio level meter */}
+                        <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                          <div 
+                            className="h-full bg-green-500 transition-all duration-100"
+                            style={{ width: `${audioLevel * 100}%` }}
+                          />
+                        </div>
+                        
+                        <p className="text-xs text-center text-muted-foreground">
+                          {audioLevel > 0.1 
+                            ? "🎤 Microphone working" 
+                            : "🔴 Speak now - no audio detected"}
+                        </p>
+                      </div>
+                    )}
+
                     <Button
-                      onClick={
-                        isRecording
-                          ? handleStopRecording
-                          : handleStartRecording
-                      }
-                      className="w-full"
+                      onClick={isRecording ? handleStopRecording : handleStartRecording}
+                      className="w-full h-12"
                       variant={isRecording ? "destructive" : "default"}
                     >
                       {isRecording ? (
                         <>
-                          <MicOff className="mr-2 h-4 w-4" />
+                          <MicOff className="mr-2 h-5 w-5" />
                           Stop Recording
                         </>
                       ) : (
                         <>
-                          <Mic className="mr-2 h-4 w-4" />
-                          Record Reply
+                          <Mic className="mr-2 h-5 w-5" />
+                          Start Recording
                         </>
                       )}
                     </Button>
-                    {isRecording && (
-                      <p className="text-sm text-center text-muted-foreground">
-                        Recording... Speak now
-                      </p>
-                    )}
                   </div>
                 ) : (
-                  <>
-                    <audio controls className="w-full">
-                      <source src={previewUrl} />
-                    </audio>
-
-                    <div className="flex gap-2 mt-4">
+                  <div className="space-y-4 py-4">
+                    <audio controls className="w-full" src={previewUrl} />
+                    
+                    <div className="flex gap-2">
                       <Button
                         onClick={handlePublishReply}
                         disabled={isProcessing}
@@ -337,7 +474,6 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
                         <Play className="mr-2 h-4 w-4" />
                         {isProcessing ? "Publishing..." : "Publish"}
                       </Button>
-
                       <Button
                         onClick={handleDiscard}
                         variant="destructive"
@@ -348,17 +484,19 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
                         Discard
                       </Button>
                     </div>
-                  </>
+                  </div>
                 )}
               </DialogContent>
             </Dialog>
 
             <Button variant="ghost" size="sm">
-              <Heart className="h-5 w-5" />
+              <Heart className="h-4 w-4 mr-1" />
+              Like
             </Button>
 
             <Button variant="ghost" size="sm">
-              <Zap className="h-5 w-5" />
+              <Zap className="h-4 w-4 mr-1" />
+              Zap
             </Button>
           </div>
         </div>
