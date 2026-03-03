@@ -14,7 +14,7 @@ export function About() {
       <Card>
         <CardHeader>
           <CardTitle className="text-4xl font-bold text-center">
-            About YakBak
+            About LUMEE BOOTH
           </CardTitle>
           <CardDescription className="text-xl text-center">
             A voice messaging app built on Nostr
@@ -22,7 +22,7 @@ export function About() {
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-muted-foreground">
-            YakBak is a simple voice messaging app built on the Nostr protocol.
+            LUMEE BOOTH is a simple voice messaging app built on the Nostr protocol.
             It allows users to record and share voice messages with their
             friends and followers on the Nostr network.
           </p>
