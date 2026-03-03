@@ -1,138 +1,182 @@
-// TestBlossom.tsx
-import { useEffect, useState } from 'react';
-import { testBlossomUpload, uploadToBlossom, getBlossomServers } from '@/lib/blossom';
-import { useCurrentUser } from '@/hooks/useCurrentUser';
-import { useNostr } from '@nostrify/react';
-import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
+import { NostrEvent } from "@nostrify/nostrify";
 
-export function TestBlossom() {
-  const { user } = useCurrentUser();
-  const { nostr } = useNostr();
-  const [logs, setLogs] = useState<string[]>([]);
-  const [status, setStatus] = useState<'idle' | 'testing' | 'uploading'>('idle');
-  const [servers, setServers] = useState<string[]>([]);
+// ============================================
+// CONSTANTS
+// ============================================
 
-  const addLog = (message: string) => {
-    setLogs(prev => [`[${new Date().toLocaleTimeString()}] ${message}`, ...prev].slice(0, 20));
-  };
+const DEFAULT_BLOSSOM_SERVERS: string[] = [
+  "https://blossom.primal.net",
+  "https://blossom.band",
+  "https://nostr.media",
+];
 
-  const runTests = async () => {
-    setStatus('testing');
-    addLog('🧪 Starting blossom tests...');
-    
-    // Test server connectivity
-    addLog('Testing server connectivity...');
-    const testServers = [
-      'https://blossom.primal.net',
-      'https://blossom.band',
-      'https://nostr.media',
-    ];
-    
-    for (const server of testServers) {
+// ============================================
+// UTILITY FUNCTIONS
+// ============================================
+
+/**
+ * Calculate SHA-256 hash of a blob
+ */
+export async function calculateSHA256(blob: Blob): Promise<string> {
+  const buffer = await blob.arrayBuffer();
+  const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Normalize blossom server URL
+ */
+function normalizeUrl(url: string): string {
+  url = url.trim();
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    url = `https://${url}`;
+  }
+  return url.replace(/\/+$/, '');
+}
+
+// ============================================
+// CORE API FUNCTIONS
+// ============================================
+
+/**
+ * Get blossom servers from user's kind:10063 or use defaults
+ */
+export async function getBlossomServers(
+  nostr: { query: (filters: any[]) => Promise<NostrEvent[]> },
+  pubkey?: string
+): Promise<string[]> {
+  // Return defaults if no pubkey
+  if (!pubkey || !nostr) {
+    return DEFAULT_BLOSSOM_SERVERS;
+  }
+
+  try {
+    const events = await nostr.query([
+      {
+        kinds: [10063],
+        authors: [pubkey],
+        limit: 10,
+      },
+    ]);
+
+    if (!events?.length) {
+      return DEFAULT_BLOSSOM_SERVERS;
+    }
+
+    // Extract server URLs from events
+    const userServers = events
+      .flatMap((event) =>
+        event.tags
+          .filter((tag) => tag[0] === "server")
+          .map((tag) => normalizeUrl(tag[1]))
+      )
+      .filter((url) => {
+        try {
+          new URL(url);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+
+    // Return user servers + defaults as fallback
+    return userServers.length ? [...userServers, ...DEFAULT_BLOSSOM_SERVERS] : DEFAULT_BLOSSOM_SERVERS;
+
+  } catch (error) {
+    console.error("Error fetching blossom servers:", error);
+    return DEFAULT_BLOSSOM_SERVERS;
+  }
+}
+
+/**
+ * Upload a blob to blossom servers
+ */
+export async function uploadToBlossom(
+  blob: Blob,
+  servers: string[] = DEFAULT_BLOSSOM_SERVERS,
+  userPubkey?: string,
+  signer?: { signEvent: (event: Partial<NostrEvent>) => Promise<NostrEvent> }
+): Promise<string> {
+  if (!userPubkey) {
+    throw new Error("User pubkey is required for upload");
+  }
+
+  if (!signer) {
+    throw new Error("Signer is required for upload");
+  }
+
+  // Calculate hash
+  const sha256 = await calculateSHA256(blob);
+
+  // Normalize servers
+  const validServers = servers
+    .map(normalizeUrl)
+    .filter(url => {
       try {
-        const response = await fetch(server, { method: 'HEAD', mode: 'cors' });
-        addLog(`✅ ${server}: ${response.status} ${response.statusText}`);
-      } catch (error) {
-        addLog(`❌ ${server}: Failed - ${error instanceof Error ? error.message : 'Unknown'}`);
+        new URL(url);
+        return true;
+      } catch {
+        return false;
       }
-    }
-    
-    // Get blossom servers
-    if (nostr && user?.pubkey) {
-      try {
-        addLog('Fetching blossom servers from Nostr...');
-        const servers = await getBlossomServers(nostr, user.pubkey);
-        setServers(servers);
-        addLog(`Found ${servers.length} servers: ${servers.join(', ')}`);
-      } catch (error) {
-        addLog(`❌ Failed to fetch servers: ${error}`);
-      }
-    }
-    
-    setStatus('idle');
-  };
-
-  const testUpload = async () => {
-    if (!user?.pubkey || !user.signer) {
-      addLog('❌ User not logged in or no signer');
-      return;
-    }
-    
-    setStatus('uploading');
-    addLog('📤 Testing upload...');
-    
-    // Create a tiny test blob
-    const testBlob = new Blob(['test audio data for blossom upload'], { 
-      type: 'audio/webm' 
     });
-    addLog(`Test blob created: ${testBlob.size} bytes, type: ${testBlob.type}`);
-    
-    try {
-      const url = await uploadToBlossom(
-        testBlob,
-        servers.length ? servers : undefined,
-        user.pubkey,
-        user.signer
-      );
-      addLog(`✅ Upload successful! URL: ${url}`);
-    } catch (error) {
-      addLog(`❌ Upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-    
-    setStatus('idle');
+
+  if (validServers.length === 0) {
+    throw new Error("No valid blossom servers available");
+  }
+
+  // Create auth event
+  const now = Math.floor(Date.now() / 1000);
+  const authEvent = {
+    kind: 24242,
+    content: `Upload audio file`,
+    tags: [
+      ["t", "upload"],
+      ["expiration", (now + 3600).toString()], // 1 hour expiry
+      ["x", sha256],
+    ],
+    created_at: now,
+    pubkey: userPubkey,
   };
 
-  return (
-    <Card className="p-6 max-w-3xl mx-auto my-8">
-      <h2 className="text-2xl font-bold mb-4">🧪 Blossom Test Panel</h2>
+  const signedEvent = await signer.signEvent(authEvent);
+  const authHeader = `Nostr ${btoa(JSON.stringify(signedEvent))}`;
+
+  // Try each server
+  for (const server of validServers) {
+    try {
+      const uploadUrl = new URL("/upload", server).toString();
       
-      <div className="space-y-4 mb-6">
-        <div className="flex gap-4">
-          <Button 
-            onClick={runTests} 
-            disabled={status !== 'idle'}
-            variant="outline"
-          >
-            {status === 'testing' ? 'Testing...' : '1. Test Connectivity'}
-          </Button>
-          
-          <Button 
-            onClick={testUpload} 
-            disabled={status !== 'idle' || !user?.pubkey}
-            variant="default"
-          >
-            {status === 'uploading' ? 'Uploading...' : '2. Test Upload'}
-          </Button>
-        </div>
-        
-        {!user?.pubkey && (
-          <p className="text-yellow-600 text-sm">
-            ⚠️ Please login to test upload
-          </p>
-        )}
-      </div>
+      const response = await fetch(uploadUrl, {
+        method: "PUT",
+        body: blob,
+        headers: {
+          "Content-Type": blob.type || "application/octet-stream",
+          "Authorization": authHeader,
+          "Accept": "application/json",
+        },
+        mode: "cors",
+      });
+
+      if (!response.ok) {
+        console.warn(`Upload failed to ${server}: ${response.status}`);
+        continue;
+      }
+
+      const data = await response.json();
       
-      <div className="bg-black text-green-400 p-4 rounded-md font-mono text-sm h-80 overflow-y-auto">
-        {logs.length === 0 ? (
-          <p className="text-gray-500">No logs yet. Run tests to see output.</p>
-        ) : (
-          logs.map((log, i) => (
-            <div key={i} className="whitespace-pre-wrap break-all">
-              {log}
-            </div>
-          ))
-        )}
-      </div>
-      
-      {servers.length > 0 && (
-        <div className="mt-4 p-3 bg-gray-100 rounded">
-          <p className="font-medium">Detected servers:</p>
-          <ul className="list-disc list-inside text-sm">
-            {servers.map(s => <li key={s}>{s}</li>)}
-          </ul>
-        </div>
-      )}
-    </Card>
-  );
+      if (!data.url) {
+        console.warn(`No URL returned from ${server}`);
+        continue;
+      }
+
+      return data.url;
+
+    } catch (error) {
+      console.warn(`Upload error to ${server}:`, error);
+      continue;
+    }
+  }
+
+  throw new Error("All blossom servers failed");
 }
