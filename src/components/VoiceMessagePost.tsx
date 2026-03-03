@@ -1,3 +1,5 @@
+"use client"; // Add this at the very top for Next.js App Router
+
 import { NostrEvent } from "@nostrify/nostrify";
 import { useAuthor } from "@/hooks/useAuthor";
 import { Card } from "@/components/ui/card";
@@ -8,7 +10,7 @@ import { useNostrPublish } from "@/hooks/useNostrPublish";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useNostr } from "@nostrify/react";
 import { toast } from "sonner";
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
   Dialog,
   DialogContent,
@@ -45,6 +47,7 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [isAudioLoading, setIsAudioLoading] = useState(true);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [isBrowser, setIsBrowser] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -57,10 +60,19 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   const npub = nip19.npubEncode(message.pubkey);
 
   // ============================================
-  // AUDIO LOADING & FORMAT DETECTION
+  // CLIENT-SIDE ONLY CHECKS
   // ============================================
 
   useEffect(() => {
+    setIsBrowser(true);
+  }, []);
+
+  // ============================================
+  // AUDIO LOADING (CLIENT-SIDE ONLY)
+  // ============================================
+
+  useEffect(() => {
+    if (!isBrowser) return;
     if (!message.content) {
       setPlaybackError(true);
       setIsAudioLoading(false);
@@ -70,85 +82,58 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
     setIsAudioLoading(true);
     setPlaybackError(false);
 
-    // Try to load audio with multiple format attempts
     const loadAudio = async () => {
       try {
-        // First, try to fetch the audio to check if it's accessible
         const response = await fetch(message.content, { method: 'HEAD' });
         if (!response.ok) {
           throw new Error(`Audio not accessible: ${response.status}`);
         }
-
-        const contentType = response.headers.get('content-type');
-        console.log('Audio content-type:', contentType);
-
-        // Set the audio URL
         setAudioUrl(message.content);
-        setIsAudioLoading(false);
-
       } catch (error) {
         console.error('Failed to load audio:', error);
         setPlaybackError(true);
+      } finally {
         setIsAudioLoading(false);
       }
     };
 
     loadAudio();
-  }, [message.content]);
+  }, [message.content, isBrowser]);
 
   // ============================================
-  // AUDIO PLAYBACK HANDLING
+  // AUDIO PLAYBACK (CLIENT-SIDE ONLY)
   // ============================================
 
   useEffect(() => {
-    if (!audioRef.current || !audioUrl) return;
+    if (!isBrowser || !audioRef.current || !audioUrl) return;
 
     const audio = audioRef.current;
-
-    const handleCanPlay = () => {
-      console.log('Audio can play');
-      setPlaybackError(false);
-    };
 
     const handleError = (e: Event) => {
       console.error('Audio playback error:', e);
       setPlaybackError(true);
-      
-      // Try to get more error info
-      const audio = e.target as HTMLAudioElement;
-      const error = audio.error;
-      if (error) {
-        console.error('Audio error code:', error.code);
-        console.error('Audio error message:', error.message);
-      }
-    };
-
-    const handleLoadStart = () => {
-      setIsAudioLoading(true);
     };
 
     const handleLoadedData = () => {
       setIsAudioLoading(false);
     };
 
-    audio.addEventListener('canplay', handleCanPlay);
     audio.addEventListener('error', handleError);
-    audio.addEventListener('loadstart', handleLoadStart);
     audio.addEventListener('loadeddata', handleLoadedData);
 
-    // Force load
-    audio.load();
-
     return () => {
-      audio.removeEventListener('canplay', handleCanPlay);
       audio.removeEventListener('error', handleError);
-      audio.removeEventListener('loadstart', handleLoadStart);
       audio.removeEventListener('loadeddata', handleLoadedData);
     };
-  }, [audioUrl]);
+  }, [audioUrl, isBrowser]);
 
-  // Cleanup on unmount
+  // ============================================
+  // CLEANUP
+  // ============================================
+
   useEffect(() => {
+    if (!isBrowser) return;
+    
     return () => {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
@@ -163,15 +148,20 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
         clearInterval(durationIntervalRef.current);
       }
     };
-  }, [previewUrl]);
+  }, [previewUrl, isBrowser]);
 
   // ============================================
-  // AUDIO LEVEL METER
+  // AUDIO LEVEL METER (CLIENT-SIDE ONLY)
   // ============================================
 
-  const setupAudioMeter = useCallback((stream: MediaStream) => {
+  const setupAudioMeter = (stream: MediaStream) => {
+    if (!isBrowser) return null;
+    
     try {
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return null;
+
+      const audioContext = new AudioContextClass();
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 256;
@@ -189,48 +179,42 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
       };
 
       updateLevel();
-
       return audioContext;
     } catch (error) {
       console.error('Failed to setup audio meter:', error);
       return null;
     }
-  }, []);
+  };
 
   // ============================================
-  // RECORDING FUNCTIONS
+  // RECORDING FUNCTIONS (CLIENT-SIDE ONLY)
   // ============================================
 
   const handleStartRecording = async () => {
+    if (!isBrowser) return;
     if (!user) {
       toast.error("Please login first");
       return;
     }
 
     try {
-      // Request microphone with specific constraints
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
           sampleRate: 48000,
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true,
         },
       });
 
       streamRef.current = stream;
       
-      // Setup audio level meter
       const audioContext = setupAudioMeter(stream);
 
-      // Determine best MIME type
       const mimeTypes = [
         'audio/webm;codecs=opus',
         'audio/webm',
         'audio/mp4',
-        'audio/ogg;codecs=opus',
-        'audio/wav',
       ];
 
       let selectedMimeType = '';
@@ -241,9 +225,6 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
         }
       }
 
-      console.log('Using MIME type:', selectedMimeType || 'browser default');
-
-      // Create recorder with options
       const recorder = new MediaRecorder(stream, {
         mimeType: selectedMimeType || undefined,
         audioBitsPerSecond: 128000,
@@ -254,51 +235,41 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           chunks.push(event.data);
-          console.log(`Chunk: ${event.data.size} bytes`);
         }
       };
 
       recorder.onstop = async () => {
-        console.log(`Recording stopped. Total chunks: ${chunks.length}`);
-        
         if (chunks.length === 0) {
           toast.error("No audio recorded");
           return;
         }
 
-        // Combine chunks
         const blob = new Blob(chunks, { 
           type: selectedMimeType || 'audio/webm' 
         });
 
-        console.log('Raw blob:', {
-          size: blob.size,
-          type: blob.type,
-        });
-
-        if (blob.size < 1000) { // Less than 1KB is probably empty
+        if (blob.size < 1000) {
           toast.error("Recording too short");
           return;
         }
 
-        // Create preview URL
         const url = URL.createObjectURL(blob);
         
-        // Test the blob with an audio element
-        const testAudio = new Audio(url);
-        
-        await new Promise((resolve, reject) => {
-          testAudio.oncanplaythrough = resolve;
-          testAudio.onerror = reject;
+        // Test the blob
+        try {
+          await new Promise((resolve, reject) => {
+            const testAudio = new Audio(url);
+            testAudio.oncanplaythrough = resolve;
+            testAudio.onerror = reject;
+            setTimeout(() => reject(new Error('Timeout')), 3000);
+          });
           
-          // Set a timeout
-          setTimeout(() => reject(new Error('Audio test timeout')), 3000);
-        });
+          setPreviewUrl(url);
+        } catch {
+          URL.revokeObjectURL(url);
+          toast.error("Recording failed quality check");
+        }
 
-        console.log('Audio test passed');
-        setPreviewUrl(url);
-
-        // Cleanup
         stream.getTracks().forEach(track => track.stop());
         streamRef.current = null;
 
@@ -321,15 +292,14 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
         setRecordingDuration(prev => prev + 1);
       }, 1000);
 
-      toast.success("Recording started");
-
     } catch (err) {
       console.error("Recording failed:", err);
-      toast.error(err instanceof Error ? err.message : "Could not access microphone");
+      toast.error("Could not access microphone");
     }
   };
 
   const handleStopRecording = () => {
+    if (!isBrowser) return;
     if (mediaRecorder && mediaRecorder.state === "recording") {
       mediaRecorder.stop();
       setMediaRecorder(null);
@@ -342,6 +312,7 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   };
 
   const handleDiscard = () => {
+    if (!isBrowser) return;
     if (previewUrl) {
       URL.revokeObjectURL(previewUrl);
       setPreviewUrl(null);
@@ -359,6 +330,7 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   // ============================================
 
   const handlePublishReply = async () => {
+    if (!isBrowser) return;
     if (!previewUrl || !user?.pubkey || !user.signer) {
       toast.error("Please record first");
       return;
@@ -369,15 +341,6 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
     try {
       const response = await fetch(previewUrl);
       const blob = await response.blob();
-
-      console.log('Publishing blob:', {
-        size: blob.size,
-        type: blob.type,
-      });
-
-      if (blob.size < 1000) {
-        throw new Error("Recording too short");
-      }
 
       const blossomServers = await getBlossomServers(nostr, user.pubkey);
       
@@ -431,6 +394,14 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   };
 
   const renderAudioPlayer = () => {
+    if (!isBrowser) {
+      return (
+        <div className="mt-2 p-4 bg-muted rounded-md text-center">
+          <p className="text-sm text-muted-foreground">Loading player...</p>
+        </div>
+      );
+    }
+
     if (isAudioLoading) {
       return (
         <div className="mt-2 p-4 bg-muted rounded-md text-center">
@@ -443,13 +414,13 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
     if (playbackError || !audioUrl) {
       return (
         <div className="mt-2 p-4 bg-destructive/10 rounded-md">
-          <p className="text-sm text-destructive mb-2">Audio cannot be played in browser</p>
+          <p className="text-sm text-destructive mb-2">Audio cannot be played</p>
           <Button
             variant="outline"
             size="sm"
             onClick={() => window.open(message.content, '_blank')}
           >
-            Download Audio File
+            Download Audio
           </Button>
         </div>
       );
@@ -466,16 +437,28 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
           <source src={audioUrl} type="audio/webm" />
           <source src={audioUrl} type="audio/mp4" />
           <source src={audioUrl} type="audio/mpeg" />
-          <source src={audioUrl} type="audio/ogg" />
-          <source src={audioUrl} type="audio/wav" />
           Your browser does not support audio.
         </audio>
-        <p className="text-xs text-muted-foreground mt-1">
-          If audio doesn't play, try downloading
-        </p>
       </div>
     );
   };
+
+  // Don't render anything complex on server
+  if (!isBrowser) {
+    return (
+      <Card className="p-4 mb-4">
+        <div className="flex items-start space-x-4">
+          <Avatar className="h-10 w-10">
+            <AvatarFallback>{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
+          </Avatar>
+          <div className="flex-1">
+            <div className="font-medium">{displayName}</div>
+            <div className="text-sm text-muted-foreground">Loading audio player...</div>
+          </div>
+        </div>
+      </Card>
+    );
+  }
 
   return (
     <Card className="p-4 mb-4">
@@ -521,11 +504,10 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
                     {isRecording && (
                       <div className="space-y-3">
                         <div className="flex justify-between text-sm">
-                          <span className="font-medium">Recording</span>
-                          <span className="font-mono">{formatDuration(recordingDuration)}</span>
+                          <span>Recording</span>
+                          <span>{formatDuration(recordingDuration)}</span>
                         </div>
                         
-                        {/* Audio level meter */}
                         <div className="space-y-1">
                           <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
                             <div 
@@ -533,10 +515,8 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
                               style={{ width: `${Math.min(audioLevel * 100, 100)}%` }}
                             />
                           </div>
-                          <p className="text-xs text-center">
-                            {audioLevel > 0.05 
-                              ? "🎤 Microphone working" 
-                              : "🔴 Speak now - no audio detected"}
+                          <p className="text-xs text-center text-muted-foreground">
+                            {audioLevel > 0.05 ? "Mic working" : "Speak now"}
                           </p>
                         </div>
                       </div>
@@ -551,7 +531,7 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
                       {isRecording ? (
                         <>
                           <MicOff className="mr-2 h-5 w-5" />
-                          Stop Recording
+                          Stop
                         </>
                       ) : (
                         <>
