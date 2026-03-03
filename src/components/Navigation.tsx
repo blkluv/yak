@@ -8,7 +8,12 @@ export function Navigation() {
 
         {/* Top Row */}
         <div className="h-16 flex items-center justify-between">
-          <Link to="/" className="flex items-center space-x-3 min-w-0">
+
+          {/* LEFT: Logo */}
+          <Link
+            to="/"
+            className="flex items-center space-x-3 flex-shrink-0"
+          >
             <img
               src="/yakbak-logo.png"
               alt="ATL5D Logo"
@@ -24,7 +29,11 @@ export function Navigation() {
             </div>
           </Link>
 
-          <LoginArea />
+          {/* RIGHT: Login / Avatar */}
+          <div className="flex items-center flex-shrink-0">
+            <LoginArea />
+          </div>
+
         </div>
 
         {/* Mobile Row */}
