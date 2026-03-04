@@ -66,15 +66,39 @@ export function VoiceMessageFab() {
     if (!user) return;
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // ✅ FIXED: Better audio constraints for stable recording
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,           // Mono for stability
+          sampleRate: 48000,          // CD quality
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          latency: 0                  // Minimize latency
+        }
+      });
 
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm")
-        ? "audio/webm"
-        : MediaRecorder.isTypeSupported("audio/mp4")
-        ? "audio/mp4"
-        : "";
+      // ✅ FIXED: Better MIME type selection
+      const mimeTypes = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+      ];
+      
+      let selectedMimeType = '';
+      for (const type of mimeTypes) {
+        if (MediaRecorder.isTypeSupported(type)) {
+          selectedMimeType = type;
+          break;
+        }
+      }
 
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+      // ✅ FIXED: Higher bitrate and smaller chunks
+      const recorder = new MediaRecorder(stream, {
+        mimeType: selectedMimeType || undefined,
+        audioBitsPerSecond: 128000,   // 128 kbps for good quality
+      });
+
       const audioChunks: Blob[] = [];
 
       recorder.ondataavailable = (event) => {
@@ -85,8 +109,14 @@ export function VoiceMessageFab() {
 
       recorder.onstop = () => {
         const blob = new Blob(audioChunks, {
-          type: recorder.mimeType || "audio/webm",
+          type: recorder.mimeType || 'audio/webm',
         });
+
+        // ✅ FIXED: Validate blob size
+        if (blob.size < 1000) {
+          toast.error("Recording too short");
+          return;
+        }
 
         const url = URL.createObjectURL(blob);
         setAudioBlobState(blob);
@@ -94,11 +124,14 @@ export function VoiceMessageFab() {
         stream.getTracks().forEach((track) => track.stop());
       };
 
-      recorder.start();
+      // ✅ FIXED: Smaller chunks = smoother playback
+      recorder.start(500); // 500ms chunks instead of 1000ms
       setMediaRecorder(recorder);
       setIsRecording(true);
       setRecordingTime(0);
       setPreviewUrl(null);
+      
+      toast.success("Recording started");
     } catch (error) {
       console.error(error);
       toast.error("Microphone access failed");
@@ -110,6 +143,7 @@ export function VoiceMessageFab() {
       mediaRecorder.stop();
       setIsRecording(false);
       setMediaRecorder(null);
+      toast.success("Recording finished");
     }
   };
 
@@ -149,7 +183,7 @@ export function VoiceMessageFab() {
       }
 
       const audioUrl = await uploadToBlossom(
-        audioBlobState, // ✅ correct blob
+        audioBlobState,
         blossomServers,
         user.pubkey,
         user.signer
