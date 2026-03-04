@@ -48,6 +48,7 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   const [isAudioLoading, setIsAudioLoading] = useState(true);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [isBrowser, setIsBrowser] = useState(false);
+  const [playbackAttempts, setPlaybackAttempts] = useState(0);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -101,7 +102,7 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   }, [message.content, isBrowser]);
 
   // ============================================
-  // AUDIO PLAYBACK (CLIENT-SIDE ONLY)
+  // AUDIO PLAYBACK (CLIENT-SIDE ONLY) - FIXED
   // ============================================
 
   useEffect(() => {
@@ -112,20 +113,43 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
     const handleError = (e: Event) => {
       console.error('Audio playback error:', e);
       setPlaybackError(true);
+      
+      // Retry logic for failed playback
+      if (playbackAttempts < 2) {
+        setTimeout(() => {
+          setPlaybackAttempts(prev => prev + 1);
+          audio.load(); // Reload the audio
+          audio.play().catch(() => {});
+        }, 1000);
+      }
     };
 
     const handleLoadedData = () => {
+      setIsAudioLoading(false);
+      setPlaybackError(false);
+    };
+
+    const handleWaiting = () => {
+      // Audio is buffering - show loading state
+      setIsAudioLoading(true);
+    };
+
+    const handlePlaying = () => {
       setIsAudioLoading(false);
     };
 
     audio.addEventListener('error', handleError);
     audio.addEventListener('loadeddata', handleLoadedData);
+    audio.addEventListener('waiting', handleWaiting);
+    audio.addEventListener('playing', handlePlaying);
 
     return () => {
       audio.removeEventListener('error', handleError);
       audio.removeEventListener('loadeddata', handleLoadedData);
+      audio.removeEventListener('waiting', handleWaiting);
+      audio.removeEventListener('playing', handlePlaying);
     };
-  }, [audioUrl, isBrowser]);
+  }, [audioUrl, isBrowser, playbackAttempts]);
 
   // ============================================
   // CLEANUP
@@ -187,7 +211,7 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   };
 
   // ============================================
-  // RECORDING FUNCTIONS (CLIENT-SIDE ONLY)
+  // RECORDING FUNCTIONS (CLIENT-SIDE ONLY) - FIXED
   // ============================================
 
   const handleStartRecording = async () => {
@@ -204,6 +228,8 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
           sampleRate: 48000,
           echoCancellation: true,
           noiseSuppression: true,
+          autoGainControl: true,
+          latency: 0
         },
       });
 
@@ -283,7 +309,7 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
         setAudioLevel(0);
       };
 
-      recorder.start(1000);
+      recorder.start(500); // FIXED: 500ms chunks for smoother recording
       setMediaRecorder(recorder);
       setIsRecording(true);
 
@@ -384,7 +410,7 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
   };
 
   // ============================================
-  // RENDER FUNCTIONS
+  // RENDER FUNCTIONS - FIXED AUDIO PLAYER
   // ============================================
 
   const formatDuration = (seconds: number) => {
@@ -432,13 +458,20 @@ export function VoiceMessagePost({ message }: VoiceMessagePostProps) {
           ref={audioRef}
           controls
           className="w-full"
-          preload="metadata"
+          preload="auto" // FIXED: Changed from "metadata" to "auto"
+          onError={() => setPlaybackError(true)}
+          onLoadedData={() => setIsAudioLoading(false)}
         >
           <source src={audioUrl} type="audio/webm" />
           <source src={audioUrl} type="audio/mp4" />
           <source src={audioUrl} type="audio/mpeg" />
           Your browser does not support audio.
         </audio>
+        {playbackAttempts > 0 && (
+          <p className="text-xs text-muted-foreground mt-1">
+            Retrying playback... ({playbackAttempts}/2)
+          </p>
+        )}
       </div>
     );
   };
