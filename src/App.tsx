@@ -9,7 +9,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { NostrLoginProvider } from "@nostrify/react/login";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import AppRouter from "./AppRouter";
-
+import { SimpleAudioTest } from '@/components/SimpleAudioTest'; // ← ADD THIS IMPORT
 // TIP: Using just one relay currently offers the best performance.
 const defaultRelays = [
   "wss://relay.primal.net",
