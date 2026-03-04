@@ -1,182 +1,131 @@
+// src/lib/blossom.ts
 import { NostrEvent } from "@nostrify/nostrify";
 
-// ============================================
-// CONSTANTS
-// ============================================
-
-const DEFAULT_BLOSSOM_SERVERS: string[] = [
+const DEFAULT_BLOSSOM_SERVERS = [
   "https://blossom.primal.net",
   "https://blossom.band",
   "https://nostr.media",
 ];
 
-// ============================================
-// UTILITY FUNCTIONS
-// ============================================
-
 /**
- * Calculate SHA-256 hash of a blob
- */
-export async function calculateSHA256(blob: Blob): Promise<string> {
-  const buffer = await blob.arrayBuffer();
-  const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-/**
- * Normalize blossom server URL
- */
-function normalizeUrl(url: string): string {
-  url = url.trim();
-  if (!url.startsWith('http://') && !url.startsWith('https://')) {
-    url = `https://${url}`;
-  }
-  return url.replace(/\/+$/, '');
-}
-
-// ============================================
-// CORE API FUNCTIONS
-// ============================================
-
-/**
- * Get blossom servers from user's kind:10063 or use defaults
+ * Get blossom servers with timeout and fallback
  */
 export async function getBlossomServers(
-  nostr: { query: (filters: any[]) => Promise<NostrEvent[]> },
+  nostr: any,
   pubkey?: string
 ): Promise<string[]> {
-  // Return defaults if no pubkey
+  console.log('[Blossom] Getting servers for:', pubkey?.slice(0, 8));
+  
+  // Always return defaults immediately (don't wait for relays)
+  const defaultServers = [...DEFAULT_BLOSSOM_SERVERS];
+  
   if (!pubkey || !nostr) {
-    return DEFAULT_BLOSSOM_SERVERS;
+    console.log('[Blossom] No pubkey, using defaults');
+    return defaultServers;
   }
 
+  // Try to get user servers with timeout
   try {
-    const events = await nostr.query([
-      {
-        kinds: [10063],
-        authors: [pubkey],
-        limit: 10,
-      },
+    // Create a promise that resolves with user servers or times out
+    const userServersPromise = (async () => {
+      const events = await nostr.query([
+        { kinds: [10063], authors: [pubkey], limit: 3 }
+      ]);
+      
+      if (!events?.length) return [];
+      
+      return events
+        .flatMap((event: any) => 
+          event.tags
+            .filter((tag: string[]) => tag[0] === 'server')
+            .map((tag: string[]) => tag[1])
+        )
+        .filter((url: string) => url?.startsWith('http'));
+    })();
+
+    // Wait max 2 seconds for user servers
+    const userServers = await Promise.race([
+      userServersPromise,
+      new Promise<string[]>((resolve) => setTimeout(() => resolve([]), 2000))
     ]);
 
-    if (!events?.length) {
-      return DEFAULT_BLOSSOM_SERVERS;
+    if (userServers.length > 0) {
+      console.log('[Blossom] Found user servers:', userServers);
+      return [...userServers, ...defaultServers];
     }
 
-    // Extract server URLs from events
-    const userServers = events
-      .flatMap((event) =>
-        event.tags
-          .filter((tag) => tag[0] === "server")
-          .map((tag) => normalizeUrl(tag[1]))
-      )
-      .filter((url) => {
-        try {
-          new URL(url);
-          return true;
-        } catch {
-          return false;
-        }
-      });
-
-    // Return user servers + defaults as fallback
-    return userServers.length ? [...userServers, ...DEFAULT_BLOSSOM_SERVERS] : DEFAULT_BLOSSOM_SERVERS;
-
   } catch (error) {
-    console.error("Error fetching blossom servers:", error);
-    return DEFAULT_BLOSSOM_SERVERS;
+    console.log('[Blossom] Error fetching user servers:', error);
   }
+
+  console.log('[Blossom] Using default servers');
+  return defaultServers;
 }
 
 /**
- * Upload a blob to blossom servers
+ * Upload to blossom with timeout
  */
 export async function uploadToBlossom(
   blob: Blob,
   servers: string[] = DEFAULT_BLOSSOM_SERVERS,
   userPubkey?: string,
-  signer?: { signEvent: (event: Partial<NostrEvent>) => Promise<NostrEvent> }
+  signer?: { signEvent: (event: any) => Promise<any> }
 ): Promise<string> {
-  if (!userPubkey) {
-    throw new Error("User pubkey is required for upload");
-  }
+  if (!userPubkey) throw new Error("User pubkey required");
+  if (!signer) throw new Error("Signer required");
 
-  if (!signer) {
-    throw new Error("Signer is required for upload");
-  }
-
-  // Calculate hash
   const sha256 = await calculateSHA256(blob);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
 
-  // Normalize servers
-  const validServers = servers
-    .map(normalizeUrl)
-    .filter(url => {
+  try {
+    for (const server of servers) {
       try {
-        new URL(url);
-        return true;
-      } catch {
-        return false;
-      }
-    });
+        const authEvent = {
+          kind: 24242,
+          content: `Upload audio`,
+          tags: [
+            ["t", "upload"],
+            ["expiration", (Math.floor(Date.now() / 1000) + 3600).toString()],
+            ["x", sha256],
+          ],
+          created_at: Math.floor(Date.now() / 1000),
+          pubkey: userPubkey,
+        };
 
-  if (validServers.length === 0) {
-    throw new Error("No valid blossom servers available");
-  }
+        const signedEvent = await signer.signEvent(authEvent);
+        const authHeader = 'Nostr ' + btoa(JSON.stringify(signedEvent));
 
-  // Create auth event
-  const now = Math.floor(Date.now() / 1000);
-  const authEvent = {
-    kind: 24242,
-    content: `Upload audio file`,
-    tags: [
-      ["t", "upload"],
-      ["expiration", (now + 3600).toString()], // 1 hour expiry
-      ["x", sha256],
-    ],
-    created_at: now,
-    pubkey: userPubkey,
-  };
+        const response = await fetch(`${server}/upload`, {
+          method: 'PUT',
+          body: blob,
+          headers: {
+            'Content-Type': blob.type || 'application/octet-stream',
+            'Authorization': authHeader,
+          },
+          signal: controller.signal,
+        });
 
-  const signedEvent = await signer.signEvent(authEvent);
-  const authHeader = `Nostr ${btoa(JSON.stringify(signedEvent))}`;
+        if (!response.ok) continue;
 
-  // Try each server
-  for (const server of validServers) {
-    try {
-      const uploadUrl = new URL("/upload", server).toString();
-      
-      const response = await fetch(uploadUrl, {
-        method: "PUT",
-        body: blob,
-        headers: {
-          "Content-Type": blob.type || "application/octet-stream",
-          "Authorization": authHeader,
-          "Accept": "application/json",
-        },
-        mode: "cors",
-      });
+        const result = await response.json();
+        if (result.url) return result.url;
 
-      if (!response.ok) {
-        console.warn(`Upload failed to ${server}: ${response.status}`);
+      } catch (err) {
+        console.log(`Upload to ${server} failed:`, err);
         continue;
       }
-
-      const data = await response.json();
-      
-      if (!data.url) {
-        console.warn(`No URL returned from ${server}`);
-        continue;
-      }
-
-      return data.url;
-
-    } catch (error) {
-      console.warn(`Upload error to ${server}:`, error);
-      continue;
     }
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   throw new Error("All blossom servers failed");
+}
+
+export async function calculateSHA256(blob: Blob): Promise<string> {
+  const buffer = await blob.arrayBuffer();
+  const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
