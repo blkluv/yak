@@ -6,7 +6,7 @@ import { About } from "@/pages/About";
 import { VoiceMessagePage } from "@/pages/VoiceMessagePage";
 import { HashtagPage } from "@/pages/HashtagPage";
 import { Navigation } from "@/components/Navigation";
-
+import { SimpleAudioTest } from '@/components/SimpleAudioTest'; // ← ADD THIS IMPORT
 export const router = createBrowserRouter([
   {
     path: "/",
